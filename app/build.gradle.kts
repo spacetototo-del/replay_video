@@ -11,8 +11,8 @@ android {
         applicationId = "com.diving.replay"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "4"
+        versionCode = 5
+        versionName = "5"
     }
 
     buildTypes {

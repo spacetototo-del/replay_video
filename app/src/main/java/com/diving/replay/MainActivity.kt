@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import androidx.activity.ComponentActivity
@@ -27,8 +28,10 @@ import kotlinx.coroutines.launch
  * Single-activity host. Owns: runtime permissions, the bound [RecordingService], and the
  * dim/wake controller (plan §11). UI lives in [AppRoot].
  *
- * The service is only ever created *after* CAMERA is granted, so its camera-type foreground
- * service can start cleanly on API 34.
+ * We ask for CAMERA + RECORD_AUDIO (+ POST_NOTIFICATIONS on T+) up front and re-ask on every
+ * start if any is still missing — otherwise a build that already had CAMERA from a prior install
+ * would never prompt for RECORD_AUDIO and the buffer would record silently. The service is only
+ * created once CAMERA is granted so its camera-type foreground service starts cleanly on API 34.
  */
 @UnstableApi
 class MainActivity : ComponentActivity() {
@@ -47,10 +50,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val requiredPermissions: Array<String>
+        get() = buildList {
+            add(Manifest.permission.CAMERA)
+            add(Manifest.permission.RECORD_AUDIO)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }.toTypedArray()
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
-    ) { grants ->
-        if (grants[Manifest.permission.CAMERA] == true) startAndBindService()
+    ) { _ ->
+        if (hasCamera() && !bound) startAndBindService()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,16 +74,13 @@ class MainActivity : ComponentActivity() {
         }
         setContent { AppRoot(service = service) }
 
-        if (hasCamera()) {
+        val missing = requiredPermissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) {
             startAndBindService()
         } else {
-            permissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.CAMERA,
-                    Manifest.permission.RECORD_AUDIO,
-                    Manifest.permission.POST_NOTIFICATIONS,
-                ),
-            )
+            permissionLauncher.launch(missing.toTypedArray())
         }
     }
 
