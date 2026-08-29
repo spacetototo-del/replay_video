@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -30,7 +31,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.util.UnstableApi
@@ -100,30 +100,48 @@ fun LivePreviewScreen(
         )
         DisposableEffect(Unit) { onDispose { service.detachPreview() } }
 
-        // status strip
-        Box(
-            Modifier
-                .align(Alignment.TopStart)
-                .padding(12.dp)
-                .background(Color(0x99000000), RoundedCornerShape(6.dp))
-                .padding(horizontal = 10.dp, vertical = 6.dp),
+        // top-left overlay: status strip, then the "saved" toast stacked under it (no overlap)
+        Column(
+            Modifier.align(Alignment.TopStart).padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Text(
-                buildString {
-                    append(com.diving.replay.Constants.VERSION_LABEL)
-                    append("  ·  ")
-                    append(
-                        when (state) {
-                            RecordingService.State.STARTING -> "starting…"
-                            RecordingService.State.BUFFERING -> "buffering ${coverageSec}s"
-                            RecordingService.State.EXPORTING -> "saving clip…"
-                            RecordingService.State.ERROR -> "buffer error"
-                        },
-                    )
-                    if (armedFrom != null) append("  •  ● REC armed")
-                },
-                color = Color.White,
-            )
+            Box(
+                Modifier
+                    .background(Color(0x99000000), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    buildString {
+                        append(com.diving.replay.Constants.VERSION_LABEL)
+                        append("  ·  ")
+                        append(
+                            when (state) {
+                                RecordingService.State.STARTING -> "starting…"
+                                RecordingService.State.BUFFERING -> "buffering ${coverageSec}s"
+                                RecordingService.State.EXPORTING -> "saving clip…"
+                                RecordingService.State.ERROR -> "buffer error"
+                            },
+                        )
+                        if (armedFrom != null) append("  •  ● REC armed")
+                    },
+                    color = Color.White,
+                )
+            }
+
+            (lastExport as? ClipExporter.Result.Saved)?.let {
+                val speedTag = if (it.speed != 1f) " ${it.speed}x" else ""
+                Text(
+                    text = if (it.partial) {
+                        "saved${speedTag} (partial, ${it.savedDurationMs / 1000}s)"
+                    } else {
+                        "saved${speedTag} ${it.savedDurationMs / 1000}s → gallery"
+                    },
+                    color = Color.White,
+                    modifier = Modifier
+                        .background(Color(0xCC00AA00), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                )
+            }
         }
 
         // zoom + lock control
@@ -153,20 +171,6 @@ fun LivePreviewScreen(
                     if (zoomLocked) append("  hold to unlock")
                 },
                 color = Color.White,
-            )
-        }
-
-        (lastExport as? ClipExporter.Result.Saved)?.let {
-            val speedTag = if (it.speed != 1f) " ${it.speed}x" else ""
-            Text(
-                text = if (it.partial) "saved${speedTag} (partial, ${it.savedDurationMs / 1000}s)" else "saved${speedTag} ${it.savedDurationMs / 1000}s → gallery",
-                color = Color.White,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 14.dp)
-                    .background(Color(0x9900AA00), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
             )
         }
 

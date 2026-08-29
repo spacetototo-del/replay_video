@@ -4,7 +4,7 @@ package com.diving.replay
 object Constants {
 
     /** Bump this every build the user tests. Mirrored in app_name (strings.xml) and versionName. */
-    const val VERSION_LABEL = "v3"
+    const val VERSION_LABEL = "v4"
 
     // ---- Wear Data Layer message paths (watch -> phone) ----
     const val PATH_MARK_START = "/mark_start"

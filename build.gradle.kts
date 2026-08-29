@@ -15,7 +15,7 @@ val syncSafeRoot = (System.getenv("LOCALAPPDATA") ?: System.getProperty("java.io
 val apkExportDir = rootProject.projectDir.parentFile.resolve("apk")
 
 // Bump alongside Constants.VERSION_LABEL / app_name / module versionName.
-val appVersionLabel = "v3"
+val appVersionLabel = "v4"
 
 subprojects {
     layout.buildDirectory.set(file("$syncSafeRoot/DivingReplayBuild/${rootProject.name}/${project.name}"))
