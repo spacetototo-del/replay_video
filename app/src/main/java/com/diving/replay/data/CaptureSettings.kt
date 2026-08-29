@@ -16,7 +16,11 @@ data class CaptureSettings(
     val bitRateBps: Int = TargetResolution.FHD_1080P.defaultBitRateBps,
     val bufferRetentionMs: Long = com.diving.replay.Constants.BUFFER_RETENTION_MS,
     val idleScreen: IdleScreenMode = IdleScreenMode.DIM,
+    /** Buffer capture frame rate. 60 = smooth 0.5x slow-mo on playback. 120 = best-effort. */
+    val captureFps: Int = 60,
 )
+
+val CAPTURE_FPS_OPTIONS = listOf(30, 60, 120)
 
 enum class TargetResolution(val label: String, val width: Int, val height: Int, val defaultBitRateBps: Int) {
     HD_720P("720p", 1280, 720, 4_000_000),
@@ -43,6 +47,7 @@ class CaptureSettingsRepository(private val context: Context) {
         val BITRATE = intPreferencesKey("bitrate_bps")
         val BUFFER_MS = longPreferencesKey("buffer_retention_ms")
         val IDLE_SCREEN = intPreferencesKey("idle_screen_ordinal")
+        val CAPTURE_FPS = intPreferencesKey("capture_fps")
     }
 
     val settings: Flow<CaptureSettings> = context.dataStore.data.map { prefs ->
@@ -56,6 +61,7 @@ class CaptureSettingsRepository(private val context: Context) {
             idleScreen = IdleScreenMode.entries.getOrElse(
                 prefs[Keys.IDLE_SCREEN] ?: IdleScreenMode.DIM.ordinal,
             ) { IdleScreenMode.DIM },
+            captureFps = (prefs[Keys.CAPTURE_FPS] ?: 60).takeIf { it in CAPTURE_FPS_OPTIONS } ?: 60,
         )
     }
 
@@ -70,4 +76,6 @@ class CaptureSettingsRepository(private val context: Context) {
     suspend fun setBufferRetentionMs(ms: Long) = context.dataStore.edit { it[Keys.BUFFER_MS] = ms }
 
     suspend fun setIdleScreen(mode: IdleScreenMode) = context.dataStore.edit { it[Keys.IDLE_SCREEN] = mode.ordinal }
+
+    suspend fun setCaptureFps(fps: Int) = context.dataStore.edit { it[Keys.CAPTURE_FPS] = fps }
 }

@@ -10,6 +10,7 @@ import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import android.util.Range
 import androidx.annotation.RequiresPermission
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -94,6 +95,10 @@ class RecordingService : LifecycleService() {
     private val _zoom = MutableStateFlow(ZoomInfo())
     val zoom: StateFlow<ZoomInfo> = _zoom.asStateFlow()
 
+    /** Capture frame rate currently in effect — the rewind screen uses it for frame-stepping. */
+    private val _captureFps = MutableStateFlow(60)
+    val captureFps: StateFlow<Int> = _captureFps.asStateFlow()
+
     override fun onCreate() {
         super.onCreate()
         settingsRepo = CaptureSettingsRepository(applicationContext)
@@ -143,11 +148,11 @@ class RecordingService : LifecycleService() {
                 .distinctUntilChanged()
                 .collect { rotation.retentionMs = it }
         }
-        // Resolution: needs a camera rebind + buffer wipe (can't concat mixed resolutions).
+        // Resolution / fps: need a camera rebind + buffer wipe (can't concat mixed encoder shapes).
         // Bitrate changes ride along on the next rebind rather than thrashing mid slider-drag.
         lifecycleScope.launch {
             settingsRepo.settings
-                .map { it.resolution }
+                .map { it.resolution to it.captureFps }
                 .distinctUntilChanged()
                 .drop(1)
                 .collect { if (hasCameraPermission()) restartBuffering() }
@@ -203,8 +208,11 @@ class RecordingService : LifecycleService() {
             .setQualitySelector(QualitySelector.from(settings.resolution.toQuality()))
             .setTargetVideoEncodingBitRate(settings.bitRateBps)
             .build()
-        val capture = VideoCapture.withOutput(recorder)
+        val capture = VideoCapture.Builder(recorder)
+            .setTargetFrameRate(Range(settings.captureFps, settings.captureFps))
+            .build()
         videoCapture = capture
+        _captureFps.value = settings.captureFps
         provider.unbindAll()
         camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture)
         camera?.cameraInfo?.zoomState?.observe(this) { zs ->
@@ -260,10 +268,11 @@ class RecordingService : LifecycleService() {
         runExport(window.first, window.second, notifyWatch = true)
     }
 
-    /** Manual export from the rewind screen (plan §4 Phase 2, "save from here"). */
-    fun exportManual(startMs: Long, endMs: Long) = runExport(startMs, endMs, notifyWatch = false)
+    /** Manual export from the rewind screen. [speed] < 1 saves a slow-motion clip. */
+    fun exportManual(startMs: Long, endMs: Long, speed: Float = 1f) =
+        runExport(startMs, endMs, notifyWatch = false, speed = speed)
 
-    private fun runExport(startMs: Long, endMs: Long, notifyWatch: Boolean) {
+    private fun runExport(startMs: Long, endMs: Long, notifyWatch: Boolean, speed: Float = 1f) {
         if (exporting) {
             if (notifyWatch) watchAck.send(WatchAck.Kind.ERROR, "export busy")
             return
@@ -272,7 +281,7 @@ class RecordingService : LifecycleService() {
         lifecycleScope.launch {
             _state.value = State.EXPORTING
             updateNotification()
-            val result = exporter.export(startMs, endMs)
+            val result = exporter.export(startMs, endMs, speed)
             _lastExport.value = result
             if (notifyWatch) {
                 when (result) {

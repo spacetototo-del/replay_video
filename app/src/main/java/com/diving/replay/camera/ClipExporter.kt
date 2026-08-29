@@ -7,9 +7,11 @@ import android.provider.MediaStore
 import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.SpeedChangeEffect
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
+import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
@@ -43,14 +45,21 @@ class ClipExporter(
             val displayName: String,
             val savedDurationMs: Long,
             val partial: Boolean,
+            /** Speed actually baked into the file. May be 1f even when slower was requested,
+             *  if the slow-motion export path failed and we fell back. */
+            val speed: Float = 1f,
         ) : Result
 
         data class Failed(val reason: String) : Result
         data object NothingToSave : Result
     }
 
-    /** Transformer must be built + started on a Looper thread; we hop to Main for that. */
-    suspend fun export(startMs: Long, endMs: Long): Result {
+    /**
+     * Transformer must be built + started on a Looper thread; we hop to Main for that.
+     * [speed] < 1 bakes slow motion into the file (audio is dropped for slow clips). If the
+     * slow path throws, we retry once at 1x so the moment is still captured.
+     */
+    suspend fun export(startMs: Long, endMs: Long, speed: Float = 1f): Result {
         val partial = rotation.isStartTruncated(startMs)
         val segments = rotation.windowBetween(startMs, endMs)
         if (segments.isEmpty()) return Result.NothingToSave
@@ -59,6 +68,25 @@ class ClipExporter(
         val effectiveEnd = minOf(endMs, segments.last().endedAtMs)
         if (effectiveEnd - effectiveStart < MIN_CLIP_MS) return Result.NothingToSave
 
+        buildAndRun(segments, effectiveStart, effectiveEnd, partial, speed)?.let { return it }
+        // slow export failed — fall back to normal speed
+        return if (speed != 1f) {
+            Log.w(TAG, "slow export ($speed x) failed, retrying at 1x")
+            buildAndRun(segments, effectiveStart, effectiveEnd, partial, 1f)
+                ?: Result.Failed("transform error")
+        } else {
+            Result.Failed("transform error")
+        }
+    }
+
+    /** Returns null on transform failure so the caller can retry / fall back. */
+    private suspend fun buildAndRun(
+        segments: List<Segment>,
+        effectiveStart: Long,
+        effectiveEnd: Long,
+        partial: Boolean,
+        speed: Float,
+    ): Result? {
         val editedItems = segments.mapIndexed { index, seg ->
             val isFirst = index == 0
             val isLast = index == segments.lastIndex
@@ -77,7 +105,14 @@ class ClipExporter(
                         .build(),
                 )
             }
-            EditedMediaItem.Builder(mediaBuilder.build()).build()
+            EditedMediaItem.Builder(mediaBuilder.build())
+                .apply {
+                    if (speed != 1f) {
+                        setEffects(Effects(emptyList(), listOf(SpeedChangeEffect(speed))))
+                        setRemoveAudio(true) // slow-motion clips are silent
+                    }
+                }
+                .build()
         }
 
         val composition = Composition.Builder(EditedMediaItemSequence(editedItems)).build()
@@ -86,14 +121,15 @@ class ClipExporter(
         return try {
             val result = withContext(Dispatchers.Main) { runTransformer(composition, cacheOut) }
             val savedDurationMs =
-                if (result.durationMs > 0) result.durationMs else (effectiveEnd - effectiveStart)
+                if (result.durationMs > 0) result.durationMs
+                else ((effectiveEnd - effectiveStart) / speed).toLong()
             val (uri, name) = withContext(Dispatchers.IO) { publishToGallery(cacheOut, effectiveStart) }
             cacheOut.delete()
-            Result.Saved(uri, name, savedDurationMs, partial)
+            Result.Saved(uri, name, savedDurationMs, partial, speed)
         } catch (e: Exception) {
-            Log.e(TAG, "export failed", e)
+            Log.e(TAG, "export failed (speed=$speed)", e)
             cacheOut.delete()
-            Result.Failed(e.message ?: "transform error")
+            null
         }
     }
 

@@ -5,6 +5,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import com.diving.replay.camera.Segment
 
 /**
@@ -15,7 +16,10 @@ import com.diving.replay.camera.Segment
 @UnstableApi
 class SegmentPlaylistPlayer(context: Context) {
 
-    val exoPlayer: ExoPlayer = ExoPlayer.Builder(context).build()
+    val exoPlayer: ExoPlayer = ExoPlayer.Builder(context).build().apply {
+        // Frame-accurate seeks so the frame-step buttons land on the exact frame.
+        setSeekParameters(SeekParameters.EXACT)
+    }
 
     /** Segments currently loaded, oldest first, with cumulative offsets. */
     private var loaded: List<Segment> = emptyList()
@@ -70,6 +74,15 @@ class SegmentPlaylistPlayer(context: Context) {
 
     val isPlaying: Boolean get() = exoPlayer.isPlaying
     fun atEnd(): Boolean = exoPlayer.playbackState == Player.STATE_ENDED
+
+    /** Playhead position on the virtual timeline, in ms. */
+    fun currentTimelineMs(): Long {
+        if (loaded.isEmpty()) return 0
+        val index = exoPlayer.currentMediaItemIndex.coerceIn(0, loaded.size - 1)
+        return (offsets.getOrElse(index) { 0L } + exoPlayer.currentPosition).coerceIn(0, totalDurationMs)
+    }
+
+    fun setSpeed(speed: Float) { exoPlayer.setPlaybackSpeed(speed) }
 
     fun play() { exoPlayer.play() }
     fun pause() { exoPlayer.pause() }

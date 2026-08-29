@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.diving.replay.Constants
+import com.diving.replay.data.CAPTURE_FPS_OPTIONS
 import com.diving.replay.data.CaptureSettingsRepository
 import com.diving.replay.data.IdleScreenMode
 import com.diving.replay.data.TargetResolution
@@ -67,6 +68,30 @@ fun SettingsScreen(onBack: () -> Unit) {
             valueRange = 2f..40f,
             steps = 37,
             onValueChange = { scope.launch { repo.setBitRate((it.toInt()) * 1_000_000) } },
+        )
+
+        Text("Capture frame rate", modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
+        val currentFps = s?.captureFps ?: 60
+        CAPTURE_FPS_OPTIONS.forEach { fps ->
+            Row(
+                Modifier
+                    .selectable(selected = fps == currentFps, onClick = { scope.launch { repo.setCaptureFps(fps) } })
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = fps == currentFps, onClick = { scope.launch { repo.setCaptureFps(fps) } })
+                Text(
+                    when (fps) {
+                        30 -> "30 fps"
+                        60 -> "60 fps  ·  smooth 0.5x slow-mo"
+                        else -> "$fps fps  ·  experimental, device-dependent"
+                    },
+                )
+            }
+        }
+        Text(
+            "Higher fps = smoother slow motion on playback, but larger buffer files and more heat. Changing it resets the current buffer.",
+            modifier = Modifier.padding(top = 4.dp),
         )
 
         Text("Buffer length", modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))

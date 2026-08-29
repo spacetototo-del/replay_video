@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Replay v2</string>
+    <string name="app_name">Replay v3</string>
     <string name="notif_channel_recording">Rolling buffer recording</string>
     <string name="notif_recording_title">Diving Replay is buffering</string>
     <string name="notif_recording_text">Keeping the last 3 minutes ready to save</string>

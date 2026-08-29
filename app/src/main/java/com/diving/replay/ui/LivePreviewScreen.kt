@@ -157,8 +157,9 @@ fun LivePreviewScreen(
         }
 
         (lastExport as? ClipExporter.Result.Saved)?.let {
+            val speedTag = if (it.speed != 1f) " ${it.speed}x" else ""
             Text(
-                text = if (it.partial) "saved (partial, ${it.savedDurationMs / 1000}s)" else "saved ${it.savedDurationMs / 1000}s → gallery",
+                text = if (it.partial) "saved${speedTag} (partial, ${it.savedDurationMs / 1000}s)" else "saved${speedTag} ${it.savedDurationMs / 1000}s → gallery",
                 color = Color.White,
                 textAlign = TextAlign.Center,
                 modifier = Modifier

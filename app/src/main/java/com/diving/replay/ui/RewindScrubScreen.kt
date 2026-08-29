@@ -8,6 +8,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -50,6 +54,7 @@ import kotlinx.coroutines.delay
  * want → "Save start–end" exports just that span. Tap the video to pause/resume.
  */
 @UnstableApi
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun RewindScrubScreen(
     service: RecordingService,
@@ -57,14 +62,29 @@ fun RewindScrubScreen(
 ) {
     val context = LocalContext.current
     val player = remember { SegmentPlaylistPlayer(context) }
+    val fps by service.captureFps.collectAsState()
+    val frameMs = (1000L / fps).coerceAtLeast(1L)
 
     var scrub by remember { mutableFloatStateOf(1f) }
     var dragging by remember { mutableStateOf(false) }
     var playing by remember { mutableStateOf(false) }
+    var speed by remember { mutableFloatStateOf(1f) }
     var startFraction by remember { mutableStateOf<Float?>(null) }
     var endFraction by remember { mutableStateOf<Float?>(null) }
     var totalMs by remember { mutableLongStateOf(0L) }
     var timelineStartMs by remember { mutableLongStateOf(0L) }
+
+    fun seekTimeline(ms: Long) {
+        val clamped = ms.coerceIn(0L, totalMs)
+        player.seekToTimeline(clamped)
+        scrub = if (totalMs > 0) clamped.toFloat() / totalMs else 0f
+    }
+
+    fun stepFrame(dir: Int) {
+        if (player.isPlaying) player.pause()
+        playing = false
+        seekTimeline(player.currentTimelineMs() + dir * frameMs)
+    }
 
     DisposableEffect(Unit) {
         // snapshot the buffer once, on entry
@@ -165,11 +185,32 @@ fun RewindScrubScreen(
             val totalSec = (totalMs / 1000).toInt()
             Text(
                 buildString {
-                    append("position ${posSec}s / ${totalSec}s")
+                    append("position ${posSec}s / ${totalSec}s  ·  ${fps}fps")
                     startFraction?.let { append("   ·   start ${(totalMs * it / 1000).toInt()}s") }
                     endFraction?.let { append("   ·   end ${(totalMs * it / 1000).toInt()}s") }
                 },
             )
+
+            // playback speed + single-frame step
+            val ctlPad = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+            FlowRow(
+                Modifier.fillMaxWidth().padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                listOf(1f to "1x", 0.5f to "0.5x", 0.25f to "0.25x").forEach { (s, label) ->
+                    if (s == speed) {
+                        Button(onClick = {}, contentPadding = ctlPad) { Text(label) }
+                    } else {
+                        OutlinedButton(
+                            onClick = { speed = s; player.setSpeed(s) },
+                            contentPadding = ctlPad,
+                        ) { Text(label) }
+                    }
+                }
+                OutlinedButton(onClick = { stepFrame(-1) }, contentPadding = ctlPad) { Text("◀ frame") }
+                OutlinedButton(onClick = { stepFrame(1) }, contentPadding = ctlPad) { Text("frame ▶") }
+            }
 
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(modifier = Modifier.weight(1f), onClick = { startFraction = scrub }) {
@@ -191,10 +232,11 @@ fun RewindScrubScreen(
                     service.exportManual(
                         timelineStartMs + (totalMs * lo).toLong(),
                         timelineStartMs + (totalMs * hi).toLong(),
+                        speed,
                     )
                     onBackToLive()
                 },
-            ) { Text("Save start–end") }
+            ) { Text(if (speed == 1f) "Save start–end" else "Save start–end (${speed}x slow-mo)") }
 
             Button(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), onClick = onBackToLive) {
                 Text("Back to live")
