@@ -30,12 +30,25 @@ class WatchMessageListenerService : WearableListenerService() {
         }
     }
 
+    /**
+     * Prefer handing the marker straight to the running service. `startForegroundService` is
+     * only the fallback for when it isn't running, and API 34 can refuse that outright for a
+     * camera-type service while the app is backgrounded — which is precisely when the watch is
+     * being used. If both paths fail the watch is told, rather than left showing "Saving…".
+     */
     private fun forward(action: String) {
-        val intent = Intent(this, RecordingService::class.java).setAction(action)
+        RecordingService.instance?.let { service ->
+            when (action) {
+                ACTION_MARK_START -> service.onMarkStart()
+                ACTION_MARK_END -> service.onMarkEnd()
+            }
+            return
+        }
         try {
-            startForegroundService(intent)
+            startForegroundService(Intent(this, RecordingService::class.java).setAction(action))
         } catch (e: Exception) {
             Log.e(TAG, "could not deliver $action to RecordingService", e)
+            WatchAck(applicationContext).send(WatchAck.Kind.ERROR, "폰 앱을 먼저 여세요")
         }
     }
 

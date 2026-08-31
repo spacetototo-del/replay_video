@@ -14,8 +14,10 @@ val syncSafeRoot = (System.getenv("LOCALAPPDATA") ?: System.getProperty("java.io
 // rootProject dir = ...\AI\260829_diving\DivingReplay  →  parent = ...\AI\260829_diving
 val apkExportDir = rootProject.projectDir.parentFile.resolve("apk")
 
-// Bump alongside Constants.VERSION_LABEL / app_name / module versionName.
-val appVersionLabel = "v5"
+// THE single place the version is written. The modules read it from rootProject.extra to derive
+// versionName/versionCode and the launcher label, and the UI reads BuildConfig — so bumping this
+// one line is the whole release. (It used to be four places that could silently disagree.)
+val appVersionLabel by extra("v9")
 
 subprojects {
     layout.buildDirectory.set(file("$syncSafeRoot/DivingReplayBuild/${rootProject.name}/${project.name}"))

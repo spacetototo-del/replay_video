@@ -61,47 +61,32 @@ class ClipExporter(
      */
     suspend fun export(startMs: Long, endMs: Long, speed: Float = 1f): Result {
         val partial = rotation.isStartTruncated(startMs)
-        val segments = rotation.windowBetween(startMs, endMs)
-        if (segments.isEmpty()) return Result.NothingToSave
+        val plan = ClipCutPlanner.plan(rotation.snapshot(), startMs, endMs)
+            ?: return Result.NothingToSave
 
-        val effectiveStart = maxOf(startMs, segments.first().startedAtMs)
-        val effectiveEnd = minOf(endMs, segments.last().endedAtMs)
-        if (effectiveEnd - effectiveStart < MIN_CLIP_MS) return Result.NothingToSave
-
-        buildAndRun(segments, effectiveStart, effectiveEnd, partial, speed)?.let { return it }
+        buildAndRun(plan, partial, speed)?.let { return it }
         // slow export failed — fall back to normal speed
         return if (speed != 1f) {
             Log.w(TAG, "slow export ($speed x) failed, retrying at 1x")
-            buildAndRun(segments, effectiveStart, effectiveEnd, partial, 1f)
-                ?: Result.Failed("transform error")
+            buildAndRun(plan, partial, 1f) ?: Result.Failed("transform error")
         } else {
             Result.Failed("transform error")
         }
     }
 
     /** Returns null on transform failure so the caller can retry / fall back. */
-    private suspend fun buildAndRun(
-        segments: List<Segment>,
-        effectiveStart: Long,
-        effectiveEnd: Long,
-        partial: Boolean,
-        speed: Float,
-    ): Result? {
-        val editedItems = segments.mapIndexed { index, seg ->
-            val isFirst = index == 0
-            val isLast = index == segments.lastIndex
-            val startInSegMs = if (isFirst) (effectiveStart - seg.startedAtMs).coerceAtLeast(0) else 0L
-            val endInSegMs = if (isLast) {
-                (effectiveEnd - seg.startedAtMs).coerceIn(1L, seg.durationMs.coerceAtLeast(1L))
-            } else {
-                -1L
-            }
-            val mediaBuilder = MediaItem.Builder().setUri(seg.file.toURI().toString())
-            if (startInSegMs > 0 || endInSegMs >= 0) {
+    private suspend fun buildAndRun(plan: ClipPlan, partial: Boolean, speed: Float): Result? {
+        val editedItems = plan.cuts.map { cut ->
+            val mediaBuilder = MediaItem.Builder().setUri(cut.segment.file.toURI().toString())
+            if (cut.startInSegmentMs > 0 || cut.endInSegmentMs != ClipCut.KEEP_TO_END) {
                 mediaBuilder.setClippingConfiguration(
                     MediaItem.ClippingConfiguration.Builder()
-                        .setStartPositionMs(startInSegMs)
-                        .apply { if (endInSegMs >= 0) setEndPositionMs(endInSegMs) }
+                        .setStartPositionMs(cut.startInSegmentMs)
+                        .apply {
+                            if (cut.endInSegmentMs != ClipCut.KEEP_TO_END) {
+                                setEndPositionMs(cut.endInSegmentMs)
+                            }
+                        }
                         .build(),
                 )
             }
@@ -122,8 +107,10 @@ class ClipExporter(
             val result = withContext(Dispatchers.Main) { runTransformer(composition, cacheOut) }
             val savedDurationMs =
                 if (result.durationMs > 0) result.durationMs
-                else ((effectiveEnd - effectiveStart) / speed).toLong()
-            val (uri, name) = withContext(Dispatchers.IO) { publishToGallery(cacheOut, effectiveStart) }
+                else (plan.keptDurationMs / speed).toLong()
+            val (uri, name) = withContext(Dispatchers.IO) {
+                publishToGallery(cacheOut, plan.effectiveStartMs)
+            }
             cacheOut.delete()
             Result.Saved(uri, name, savedDurationMs, partial, speed)
         } catch (e: Exception) {
@@ -180,6 +167,5 @@ class ClipExporter(
 
     companion object {
         private const val TAG = "ClipExporter"
-        private const val MIN_CLIP_MS = 300L
     }
 }

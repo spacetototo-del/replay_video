@@ -10,8 +10,9 @@ import com.diving.replay.camera.Segment
 
 /**
  * Plays the buffer segments back-to-back as one virtual timeline for the rewind scrubber
- * (plan §1.1, §4 Phase 2). No files are merged — ExoPlayer just plays a playlist and we map an
- * absolute "seconds into the last 3 minutes" position onto (itemIndex, positionMs).
+ * (plan §1.1, §4 Phase 2). No files are merged — ExoPlayer just plays a playlist, and
+ * [SegmentTimeline] maps a scrub position onto (mediaItemIndex, positionMs) and back onto
+ * wall-clock time for the exporter.
  */
 @UnstableApi
 class SegmentPlaylistPlayer(context: Context) {
@@ -21,66 +22,88 @@ class SegmentPlaylistPlayer(context: Context) {
         setSeekParameters(SeekParameters.EXACT)
     }
 
-    /** Segments currently loaded, oldest first, with cumulative offsets. */
-    private var loaded: List<Segment> = emptyList()
-    private var offsets: LongArray = LongArray(0)
+    var timeline: SegmentTimeline = SegmentTimeline(emptyList())
+        private set
 
     /** Total scrubbable duration in ms. */
-    var totalDurationMs: Long = 0
-        private set
-
-    /** Wall-clock time the timeline starts at (start of the oldest loaded segment). */
-    var timelineStartMs: Long = 0
-        private set
+    val totalDurationMs: Long get() = timeline.totalDurationMs
 
     fun load(segments: List<Segment>) {
-        loaded = segments.sortedBy { it.startedAtMs }
-        offsets = LongArray(loaded.size)
-        var acc = 0L
-        loaded.forEachIndexed { i, seg ->
-            offsets[i] = acc
-            acc += seg.durationMs
-        }
-        totalDurationMs = acc
-        timelineStartMs = loaded.firstOrNull()?.startedAtMs ?: 0
-
-        exoPlayer.setMediaItems(loaded.map { MediaItem.fromUri(it.file.toURI().toString()) })
+        timeline = SegmentTimeline(segments)
+        exoPlayer.setMediaItems(timeline.segments.map(::mediaItemFor))
         exoPlayer.prepare()
     }
 
-    /** Seek to [positionMs] measured from the start of the virtual timeline. */
-    fun seekToTimeline(positionMs: Long) {
-        if (loaded.isEmpty()) return
-        val clamped = positionMs.coerceIn(0, totalDurationMs)
-        var index = offsets.indexOfLast { it <= clamped }
-        if (index < 0) index = 0
-        exoPlayer.seekTo(index, clamped - offsets[index])
+    /**
+     * Bring the playlist in line with a still-growing buffer *without* interrupting playback —
+     * what continuous delayed replay needs, since [load] would restart it every 15 seconds.
+     *
+     * The ring only ever loses items from the front and gains them at the back, so this is an
+     * append plus a front-trim; ExoPlayer keeps playing the current item through both. Anything
+     * that doesn't match that shape (a resolution change wipes the buffer, for instance) falls
+     * back to a full reload.
+     */
+    fun sync(segments: List<Segment>) {
+        val next = SegmentTimeline(segments)
+        val oldFiles = timeline.segments.map { it.file }
+        val newFiles = next.segments.map { it.file }
+
+        if (oldFiles == newFiles) {
+            timeline = next // same files; durations may have been filled in
+            return
+        }
+        if (oldFiles.isEmpty() || newFiles.isEmpty()) {
+            load(segments)
+            return
+        }
+
+        val dropped = oldFiles.indexOf(newFiles.first()).let { if (it < 0) oldFiles.size else it }
+        val kept = oldFiles.drop(dropped)
+        if (kept != newFiles.take(kept.size)) {
+            load(segments) // not a simple slide — rebuild
+            return
+        }
+
+        if (dropped > 0) exoPlayer.removeMediaItems(0, dropped)
+        val appended = next.segments.drop(kept.size)
+        if (appended.isNotEmpty()) exoPlayer.addMediaItems(appended.map(::mediaItemFor))
+        timeline = next
     }
 
-    /** Current absolute wall-clock position the player is showing. */
-    fun currentWallClockMs(): Long {
-        val index = exoPlayer.currentMediaItemIndex.coerceIn(0, (loaded.size - 1).coerceAtLeast(0))
-        if (loaded.isEmpty()) return 0
-        return timelineStartMs + offsets[index] + exoPlayer.currentPosition
+    private fun mediaItemFor(segment: Segment): MediaItem =
+        MediaItem.fromUri(segment.file.toURI().toString())
+
+    /** Seek to [positionMs] measured from the start of the virtual timeline. */
+    fun seekToTimeline(positionMs: Long) {
+        if (timeline.isEmpty) return
+        val (index, within) = timeline.positionInItem(positionMs)
+        exoPlayer.seekTo(index, within)
     }
+
+    /** Playhead position on the virtual timeline, in ms. */
+    fun currentTimelineMs(): Long {
+        if (timeline.isEmpty) return 0
+        val index = exoPlayer.currentMediaItemIndex.coerceIn(0, timeline.segments.lastIndex)
+        return (timeline.offsetOf(index) + exoPlayer.currentPosition)
+            .coerceIn(0, timeline.totalDurationMs)
+    }
+
+    /**
+     * Wall-clock time for a 0..1 position on the scrubber. This is what the exporter cuts
+     * against, so it goes through the timeline's real per-segment timestamps rather than
+     * assuming the segments are contiguous.
+     */
+    fun wallClockAtFraction(fraction: Float): Long = timeline.fractionToWallClock(fraction)
 
     /** Where the playhead sits as a 0..1 fraction of the virtual timeline. */
     fun timelineFraction(): Float {
-        if (totalDurationMs <= 0) return 0f
-        val index = exoPlayer.currentMediaItemIndex.coerceIn(0, (loaded.size - 1).coerceAtLeast(0))
-        val pos = offsets.getOrElse(index) { 0L } + exoPlayer.currentPosition
-        return (pos.toFloat() / totalDurationMs).coerceIn(0f, 1f)
+        val total = timeline.totalDurationMs
+        if (total <= 0) return 0f
+        return (currentTimelineMs().toFloat() / total).coerceIn(0f, 1f)
     }
 
     val isPlaying: Boolean get() = exoPlayer.isPlaying
     fun atEnd(): Boolean = exoPlayer.playbackState == Player.STATE_ENDED
-
-    /** Playhead position on the virtual timeline, in ms. */
-    fun currentTimelineMs(): Long {
-        if (loaded.isEmpty()) return 0
-        val index = exoPlayer.currentMediaItemIndex.coerceIn(0, loaded.size - 1)
-        return (offsets.getOrElse(index) { 0L } + exoPlayer.currentPosition).coerceIn(0, totalDurationMs)
-    }
 
     fun setSpeed(speed: Float) { exoPlayer.setPlaybackSpeed(speed) }
 

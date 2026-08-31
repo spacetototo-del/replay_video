@@ -3,8 +3,8 @@ package com.diving.replay
 /** Shared constants for the phone app. Watch-side mirrors the message paths. */
 object Constants {
 
-    /** Bump this every build the user tests. Mirrored in app_name (strings.xml) and versionName. */
-    const val VERSION_LABEL = "v5"
+    /** Shown top-left on the live screen. Derived from the one version in the root build script. */
+    val VERSION_LABEL = "v${BuildConfig.VERSION_NAME}"
 
     // ---- Wear Data Layer message paths (watch -> phone) ----
     const val PATH_MARK_START = "/mark_start"
@@ -32,9 +32,9 @@ object Constants {
     const val EXPORT_RELATIVE_DIR = "Movies/DivingReplay"
 
     // ---- Screen wake (plan §11) ----
-    /** No screen touch (or watch REC) for this long → the screen dims / turns off. Any touch
-     *  snaps it back to full brightness and restarts the timer. */
-    const val SCREEN_IDLE_DIM_MS = 15_000L
+    /** Fallback idle-dim delay before Settings loads; the real value is `CaptureSettings.dimAfterSec`.
+     *  No screen touch (or watch REC) for this long → the screen dims / turns off; any touch resets it. */
+    const val SCREEN_IDLE_DIM_MS = 30_000L
 
     // ---- Exported clip retention (plan §10 / §13 Q3) ----
     /** Keep the most recent N exported clips; older ones are offered for cleanup. */

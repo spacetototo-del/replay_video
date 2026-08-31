@@ -43,11 +43,28 @@ class MainActivity : ComponentActivity() {
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = (binder as RecordingService.LocalBinder).service
+            pushDisplayRotation()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             service = null
         }
+    }
+
+    /**
+     * The service has no visual context of its own, so the Activity is the only place that can
+     * read the real display rotation. Without it, recording the phone held upright produces
+     * sideways files. The Activity is recreated on rotation, so onStart covers the changes.
+     */
+    @Suppress("DEPRECATION")
+    private fun pushDisplayRotation() {
+        val svc = service ?: return
+        val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.rotation ?: return
+        } else {
+            windowManager.defaultDisplay.rotation
+        }
+        svc.updateTargetRotation(rotation)
     }
 
     private val requiredPermissions: Array<String>
@@ -70,9 +87,17 @@ class MainActivity : ComponentActivity() {
         wake = ScreenWakeController(this, lifecycleScope)
         val settingsRepo = CaptureSettingsRepository(applicationContext)
         lifecycleScope.launch {
-            settingsRepo.settings.collect { wake.mode = it.idleScreen }
+            settingsRepo.settings.collect {
+                wake.mode = it.idleScreen
+                wake.dimAfterMs = it.dimAfterSec * 1000L
+            }
         }
-        setContent { AppRoot(service = service) }
+        setContent {
+            AppRoot(
+                service = service,
+                onHoldScreenAwake = { wake.holdAwake = it },
+            )
+        }
 
         val missing = requiredPermissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
@@ -88,6 +113,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         wake.onStart()
         if (hasCamera() && !bound) startAndBindService()
+        pushDisplayRotation()
     }
 
     override fun onUserInteraction() {

@@ -72,19 +72,14 @@ class SegmentRotationManager(
         }
     }
 
-    /** Segments overlapping [startMs, endMs], oldest first. Used by the exporter. */
-    fun windowBetween(startMs: Long, endMs: Long): List<Segment> = lock.withLock {
-        live.filter { it.startedAtMs < endMs && it.endedAtMs > startMs }.sortedBy { it.startedAtMs }
-    }
+    /** Immutable copy of the whole ring, oldest first. [ClipCutPlanner] narrows it to a window. */
+    fun snapshot(): List<Segment> = lock.withLock { live.sortedBy { it.startedAtMs } }
 
     /** True if the requested start is older than what the buffer still holds (plan §4 Phase 3). */
     fun isStartTruncated(startMs: Long): Boolean = lock.withLock {
         val earliest = live.firstOrNull()?.startedAtMs ?: return true
         startMs < earliest
     }
-
-    /** Wall-clock time of the oldest surviving frame, or null if the buffer is empty. */
-    fun earliestTimestampMs(): Long? = lock.withLock { live.firstOrNull()?.startedAtMs }
 
     /** How much footage is currently scrubbable, in ms. */
     fun coverageMs(): Long = lock.withLock {

@@ -9,8 +9,12 @@ import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import android.util.Range
+import android.view.Surface
+import android.view.WindowManager
+import androidx.annotation.RequiresApi
 import androidx.annotation.RequiresPermission
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -49,6 +53,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import java.io.File
 
 /**
@@ -79,7 +84,13 @@ class RecordingService : LifecycleService() {
     private val preview = Preview.Builder().build()
     private var activeRecording: Recording? = null
     private var segmentLoop: Job? = null
-    private var exporting = false
+
+    /** Serialises exports — two STOPs in quick succession must not both start a Transformer. */
+    private val exportLock = Mutex()
+
+    /** Display rotation baked into the recorded files. Pushed down by the Activity. */
+    @Volatile
+    private var targetRotation: Int = Surface.ROTATION_0
 
     private val _state = MutableStateFlow(State.STARTING)
     val state: StateFlow<State> = _state.asStateFlow()
@@ -99,14 +110,34 @@ class RecordingService : LifecycleService() {
     private val _captureFps = MutableStateFlow(60)
     val captureFps: StateFlow<Int> = _captureFps.asStateFlow()
 
+    /** False when RECORD_AUDIO is missing, so the UI can say the buffer is silent. */
+    private val _audioEnabled = MutableStateFlow(true)
+    val audioEnabled: StateFlow<Boolean> = _audioEnabled.asStateFlow()
+
+    /**
+     * Device thermal pressure. Hours of 60fps capture in the sun will throttle a phone, and the
+     * first symptom is dropped frames rather than an error — so surface it.
+     *
+     * Deliberately advisory only: the obvious "fix" of dropping resolution automatically would
+     * force a camera rebind, which wipes the rolling buffer. Losing the last three minutes
+     * mid-session is worse than a warm phone, so the choice stays with the user.
+     */
+    private val _overheating = MutableStateFlow(false)
+    val overheating: StateFlow<Boolean> = _overheating.asStateFlow()
+    private var thermal: Pair<PowerManager.OnThermalStatusChangedListener, PowerManager>? = null
+
     override fun onCreate() {
         super.onCreate()
+        instance = this
         settingsRepo = CaptureSettingsRepository(applicationContext)
         rotation = SegmentRotationManager(File(filesDir, Constants.SEGMENT_DIR))
         exporter = ClipExporter(applicationContext, rotation)
         watchAck = WatchAck(applicationContext)
+        targetRotation = seedRotationFromDisplay()
+        _audioEnabled.value = hasAudioPermission()
         startForegroundCompat()
         observeSettings()
+        observeThermal()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -129,14 +160,34 @@ class RecordingService : LifecycleService() {
     fun attachPreview(surfaceProvider: Preview.SurfaceProvider) = preview.setSurfaceProvider(surfaceProvider)
     fun detachPreview() = preview.setSurfaceProvider(null)
 
-    /** Pinch-to-zoom from the live screen. Clamped to the sensor's supported range. */
+    private var lastZoomSentAtMs = 0L
+
+    /**
+     * Pinch-to-zoom from the live screen. Clamped to the sensor's supported range and rate-limited:
+     * a fast pinch fires touch events far quicker than the camera HAL can apply them, and pushing
+     * every one just backs up a queue and makes the zoom stutter. ~30 Hz is smooth enough.
+     */
     fun setZoomRatio(ratio: Float) {
         val cam = camera ?: return
+        val now = System.currentTimeMillis()
+        if (now - lastZoomSentAtMs < 33L) return
+        lastZoomSentAtMs = now
         val z = _zoom.value
         cam.cameraControl.setZoomRatio(ratio.coerceIn(z.minRatio, z.maxRatio))
     }
 
     fun bufferCoverageMs(): Long = rotation.coverageMs()
+
+    /**
+     * Keep recorded files upright. Only the Activity has a visual context that knows the real
+     * display rotation, so it pushes the value down; CameraX applies it without a rebind.
+     */
+    fun updateTargetRotation(displayRotation: Int) {
+        if (displayRotation == targetRotation) return
+        targetRotation = displayRotation
+        preview.setTargetRotation(displayRotation)
+        videoCapture?.setTargetRotation(displayRotation)
+    }
 
     // ---- settings: rebind + wipe buffer when the encoder shape changes (plan §4 Phase 6) ----
 
@@ -164,9 +215,9 @@ class RecordingService : LifecycleService() {
         segmentLoop?.cancel()
         activeRecording?.stop()
         activeRecording = null
-        camera = null
         rotation.clear() // segments at a different resolution can't be concatenated
         segmentLoop = null
+        // `camera` is deliberately left set: bindCamera() needs it to detach the old zoom observer.
         startBuffering()
     }
 
@@ -210,9 +261,15 @@ class RecordingService : LifecycleService() {
             .build()
         val capture = VideoCapture.Builder(recorder)
             .setTargetFrameRate(Range(settings.captureFps, settings.captureFps))
+            .setTargetRotation(targetRotation)
             .build()
         videoCapture = capture
+        preview.setTargetRotation(targetRotation)
         _captureFps.value = settings.captureFps
+
+        // Drop the previous binding's zoom observer first — rebinding on every settings change
+        // would otherwise stack a new observer on each pass.
+        camera?.cameraInfo?.zoomState?.removeObservers(this)
         provider.unbindAll()
         camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture)
         camera?.cameraInfo?.zoomState?.observe(this) { zs ->
@@ -223,24 +280,47 @@ class RecordingService : LifecycleService() {
     @RequiresPermission(Manifest.permission.CAMERA)
     private suspend fun recordOneSegment() {
         val capture = videoCapture ?: return
-        val startedAt = System.currentTimeMillis()
-        val file = rotation.newSegmentFile(startedAt)
+        val requestedAtMs = System.currentTimeMillis()
+        val file = rotation.newSegmentFile(requestedAtMs)
         val finalized = CompletableDeferred<Long>()
 
+        val withAudio = hasAudioPermission() // plan §7: RECORD_AUDIO optional
+        _audioEnabled.value = withAudio
         val pending = capture.output.prepareRecording(this, FileOutputOptions.Builder(file).build())
-        if (hasAudioPermission()) pending.withAudioEnabled() // plan §7: RECORD_AUDIO optional
+        if (withAudio) pending.withAudioEnabled()
+
+        // Wall-clock time of this segment's *first frame*. It is not `requestedAtMs`: camera
+        // warm-up and muxer startup put the first frame measurably later, and treating the two as
+        // equal makes every scrub position drift further from the truth the older it gets.
+        // Back-compute it instead — `now - recordedDuration` is the encoder's own view of when it
+        // began. Callback latency can only ever make a sample look later than reality, so the
+        // smallest sample over the segment's life is the closest estimate.
+        // All these callbacks run on the same main executor, so the var needs no synchronisation.
+        var anchorMs = Long.MAX_VALUE
+        fun sampleAnchor(recordedNanos: Long) {
+            val recordedMs = recordedNanos / 1_000_000
+            if (recordedMs > 0) anchorMs = minOf(anchorMs, System.currentTimeMillis() - recordedMs)
+        }
 
         val recording = pending.start(ContextCompat.getMainExecutor(this)) { event ->
-            if (event is VideoRecordEvent.Finalize) {
-                val durationMs = event.recordingStats.recordedDurationNanos / 1_000_000
-                if (event.hasError() && event.error != VideoRecordEvent.Finalize.ERROR_DURATION_LIMIT_REACHED) {
-                    Log.w(TAG, "segment finalize error ${event.error}")
-                    file.delete()
-                    finalized.complete(0)
-                } else {
-                    rotation.register(file, startedAt, durationMs)
-                    finalized.complete(durationMs)
+            when (event) {
+                is VideoRecordEvent.Status -> sampleAnchor(event.recordingStats.recordedDurationNanos)
+                is VideoRecordEvent.Finalize -> {
+                    val durationMs = event.recordingStats.recordedDurationNanos / 1_000_000
+                    sampleAnchor(event.recordingStats.recordedDurationNanos)
+                    val startedAtMs = if (anchorMs != Long.MAX_VALUE) anchorMs else requestedAtMs
+                    if (event.hasError() &&
+                        event.error != VideoRecordEvent.Finalize.ERROR_DURATION_LIMIT_REACHED
+                    ) {
+                        Log.w(TAG, "segment finalize error ${event.error}")
+                        file.delete()
+                        finalized.complete(0)
+                    } else {
+                        rotation.register(file, startedAtMs, durationMs)
+                        finalized.complete(durationMs)
+                    }
                 }
+                else -> Unit
             }
         }
         activeRecording = recording
@@ -262,7 +342,7 @@ class RecordingService : LifecycleService() {
         val window = markers.markEnd(atMs)
         updateNotification()
         if (window == null) {
-            watchAck.send(WatchAck.Kind.ERROR, "STOP without REC")
+            watchAck.send(WatchAck.Kind.ERROR, "REC 없이 STOP")
             return
         }
         runExport(window.first, window.second, notifyWatch = true)
@@ -273,34 +353,41 @@ class RecordingService : LifecycleService() {
         runExport(startMs, endMs, notifyWatch = false, speed = speed)
 
     private fun runExport(startMs: Long, endMs: Long, notifyWatch: Boolean, speed: Float = 1f) {
-        if (exporting) {
-            if (notifyWatch) watchAck.send(WatchAck.Kind.ERROR, "export busy")
+        // tryLock (not withLock) so a second STOP while one export is running is rejected
+        // outright rather than queued — the user gets told, instead of silently waiting.
+        if (!exportLock.tryLock()) {
+            if (notifyWatch) watchAck.send(WatchAck.Kind.ERROR, "저장 중")
             return
         }
-        exporting = true
         lifecycleScope.launch {
-            _state.value = State.EXPORTING
-            updateNotification()
-            val result = exporter.export(startMs, endMs, speed)
-            _lastExport.value = result
-            if (notifyWatch) {
-                when (result) {
-                    is ClipExporter.Result.Saved ->
-                        watchAck.send(
-                            if (result.partial) WatchAck.Kind.PARTIAL else WatchAck.Kind.SAVED,
-                            "${result.savedDurationMs / 1000}s",
-                        )
-                    is ClipExporter.Result.Failed -> watchAck.send(WatchAck.Kind.ERROR, result.reason)
-                    ClipExporter.Result.NothingToSave -> watchAck.send(WatchAck.Kind.ERROR, "nothing buffered")
+            try {
+                _state.value = State.EXPORTING
+                updateNotification()
+                val result = exporter.export(startMs, endMs, speed)
+                _lastExport.value = result
+                if (notifyWatch) {
+                    when (result) {
+                        is ClipExporter.Result.Saved ->
+                            watchAck.send(
+                                if (result.partial) WatchAck.Kind.PARTIAL else WatchAck.Kind.SAVED,
+                                "${result.savedDurationMs / 1000}s",
+                            )
+                        is ClipExporter.Result.Failed -> watchAck.send(WatchAck.Kind.ERROR, result.reason)
+                        ClipExporter.Result.NothingToSave ->
+                            watchAck.send(WatchAck.Kind.ERROR, "버퍼 없음")
+                    }
                 }
+            } finally {
+                exportLock.unlock()
+                _state.value = if (segmentLoop?.isActive == true) State.BUFFERING else State.ERROR
+                updateNotification()
             }
-            exporting = false
-            _state.value = if (segmentLoop?.isActive == true) State.BUFFERING else State.ERROR
-            updateNotification()
         }
     }
 
     override fun onDestroy() {
+        instance = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) unregisterThermalListener()
         segmentLoop?.cancel()
         activeRecording?.stop()
         cameraProvider?.unbindAll()
@@ -314,6 +401,43 @@ class RecordingService : LifecycleService() {
 
     private fun hasAudioPermission() =
         ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    private fun observeThermal() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) registerThermalListener()
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun registerThermalListener() {
+        val pm = getSystemService(POWER_SERVICE) as? PowerManager ?: return
+        fun apply(status: Int) {
+            val hot = status >= PowerManager.THERMAL_STATUS_SEVERE
+            if (hot && !_overheating.value) {
+                Log.w(TAG, "thermal status $status — capture may start dropping frames")
+            }
+            _overheating.value = hot
+        }
+        val listener = PowerManager.OnThermalStatusChangedListener { status -> apply(status) }
+        runCatching {
+            pm.addThermalStatusListener(listener)
+            apply(pm.currentThermalStatus)
+            thermal = listener to pm
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun unregisterThermalListener() {
+        thermal?.let { (listener, pm) -> runCatching { pm.removeThermalStatusListener(listener) } }
+        thermal = null
+    }
+
+    /**
+     * Best-effort starting rotation. A Service has no visual context, so this can legitimately
+     * fail — the Activity corrects it via [updateTargetRotation] as soon as it binds.
+     */
+    private fun seedRotationFromDisplay(): Int = runCatching {
+        @Suppress("DEPRECATION")
+        (getSystemService(WINDOW_SERVICE) as WindowManager).defaultDisplay.rotation
+    }.getOrDefault(Surface.ROTATION_0)
 
     private fun startForegroundCompat() {
         val n = buildNotification()
@@ -331,9 +455,9 @@ class RecordingService : LifecycleService() {
 
     private fun buildNotification(): Notification {
         val text = when (_state.value) {
-            State.EXPORTING -> "Saving clip…"
-            State.ERROR -> "Buffer stopped — reopen the app"
-            else -> if (markers.isArmed) "REC armed — buffering" else getString(R.string.notif_recording_text)
+            State.EXPORTING -> "클립 저장 중…"
+            State.ERROR -> "버퍼 중지됨 — 앱을 다시 여세요"
+            else -> if (markers.isArmed) "녹화 중 — 버퍼링" else getString(R.string.notif_recording_text)
         }
         return NotificationCompat.Builder(this, DivingReplayApp.CHANNEL_RECORDING)
             .setContentTitle(getString(R.string.notif_recording_title))
@@ -347,6 +471,18 @@ class RecordingService : LifecycleService() {
     companion object {
         private const val TAG = "RecordingService"
         private const val NOTIF_ID = 42
+
+        /**
+         * The live instance while the service is running, or null.
+         *
+         * Lets [WatchMessageListenerService] hand a marker straight to the running service
+         * instead of going through `startForegroundService`, which API 34 can refuse outright
+         * for a camera-type service when the app is in the background — exactly the situation
+         * the watch exists for. Cleared in [onDestroy], so it holds nothing after teardown.
+         */
+        @Volatile
+        var instance: RecordingService? = null
+            private set
 
         fun start(context: Context) {
             val intent = Intent(context, RecordingService::class.java)

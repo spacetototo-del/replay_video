@@ -3,6 +3,10 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+// Single-sourced from the root build script — see the comment on `appVersionLabel` there.
+val appVersionLabel: String by rootProject.extra
+val appVersionNumber = appVersionLabel.removePrefix("v")
+
 android {
     namespace = "com.diving.replay.wear"
     compileSdk = 34
@@ -11,8 +15,9 @@ android {
         applicationId = "com.diving.replay" // must match the phone app for the Data Layer
         minSdk = 30
         targetSdk = 34
-        versionCode = 5
-        versionName = "5"
+        versionCode = appVersionNumber.toInt()
+        versionName = appVersionNumber
+        resValue("string", "app_name", "Rep $appVersionLabel")
     }
 
     buildTypes {

@@ -3,6 +3,10 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+// Single-sourced from the root build script — see the comment on `appVersionLabel` there.
+val appVersionLabel: String by rootProject.extra
+val appVersionNumber = appVersionLabel.removePrefix("v")
+
 android {
     namespace = "com.diving.replay"
     compileSdk = 34
@@ -11,8 +15,10 @@ android {
         applicationId = "com.diving.replay"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "5"
+        versionCode = appVersionNumber.toInt()
+        versionName = appVersionNumber
+        // Launcher label. Kept short so One UI's home screen doesn't truncate the version away.
+        resValue("string", "app_name", "Rep $appVersionLabel")
     }
 
     buildTypes {
@@ -33,12 +39,18 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true // the UI shows BuildConfig.VERSION_NAME
     }
     composeOptions {
         kotlinCompilerExtensionVersion = libs.versions.composeCompiler.get()
     }
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+    testOptions {
+        // The buffer/timeline logic under test touches android.util.Log; stubbing it out keeps
+        // these as plain JVM tests (no device or emulator needed).
+        unitTests.isReturnDefaultValues = true
     }
 }
 
@@ -78,4 +90,6 @@ dependencies {
 
     // Settings persistence (resolution / bitrate / buffer length)
     implementation(libs.androidx.datastore.preferences)
+
+    testImplementation(libs.junit)
 }

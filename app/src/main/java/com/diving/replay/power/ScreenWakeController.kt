@@ -40,8 +40,34 @@ class ScreenWakeController(
             if (started) bumpAwake()
         }
 
+    /** Seconds of no touch before the screen dims / turns off. Set from Settings. */
+    var dimAfterMs: Long = Constants.SCREEN_IDLE_DIM_MS
+        set(value) {
+            field = value
+            if (started) bumpAwake()
+        }
+
+    /**
+     * Suspends the idle timer entirely. Watching a replay involves no touching, so the normal
+     * "no touch for 15s" rule would dim the screen in the middle of the thing being watched.
+     */
+    var holdAwake: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            if (started) bumpAwake()
+        }
+
     private var started = false
     private var redimJob: Job? = null
+
+    /**
+     * Right after a cold start the user is often busy with the system permission dialog, whose
+     * touches never reach this Activity — so the normal "no touch → dim" timer would darken the
+     * screen mid-setup. Hold full brightness for the first two minutes of the process regardless.
+     */
+    private var graceUntilMs = 0L
+    private var everStarted = false
 
     private val wakeReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -51,6 +77,10 @@ class ScreenWakeController(
 
     fun onStart() {
         started = true
+        if (!everStarted) {
+            everStarted = true
+            graceUntilMs = System.currentTimeMillis() + STARTUP_GRACE_MS
+        }
         ContextCompat.registerReceiver(
             activity,
             wakeReceiver,
@@ -80,9 +110,10 @@ class ScreenWakeController(
         activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (mode == IdleScreenMode.SCREEN_OFF) nudgeScreenOn()
         setBrightness(if (mode == IdleScreenMode.ALWAYS_BRIGHT) BRIGHTNESS_NONE else BRIGHTNESS_FULL)
-        if (mode == IdleScreenMode.ALWAYS_BRIGHT) return
+        if (mode == IdleScreenMode.ALWAYS_BRIGHT || holdAwake) return
+        val graceLeft = graceUntilMs - System.currentTimeMillis()
         redimJob = scope.launch {
-            delay(Constants.SCREEN_IDLE_DIM_MS)
+            delay(maxOf(dimAfterMs, graceLeft))
             settleIdle()
         }
     }
@@ -123,6 +154,9 @@ class ScreenWakeController(
     }
 
     companion object {
+        /** No auto-dim for this long after the process starts (permission-dialog grace). */
+        const val STARTUP_GRACE_MS = 120_000L
+
         /** Lowest non-off brightness; tune during real-world battery testing (plan §11). */
         const val BRIGHTNESS_DIM = 0.03f
         const val BRIGHTNESS_FULL = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_FULL

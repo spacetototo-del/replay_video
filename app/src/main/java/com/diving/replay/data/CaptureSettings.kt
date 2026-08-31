@@ -18,9 +18,17 @@ data class CaptureSettings(
     val idleScreen: IdleScreenMode = IdleScreenMode.DIM,
     /** Buffer capture frame rate. 60 = smooth 0.5x slow-mo on playback. 120 = best-effort. */
     val captureFps: Int = 60,
+    /** How far behind live the delayed-replay screen runs — long enough to climb out and look. */
+    val replayDelayMs: Long = 25_000L,
+    /** Seconds with no screen touch before the display dims / turns off (DIM / SCREEN_OFF modes). */
+    val dimAfterSec: Int = 30,
 )
 
 val CAPTURE_FPS_OPTIONS = listOf(30, 60, 120)
+
+val REPLAY_DELAY_OPTIONS_MS = listOf(10_000L, 15_000L, 25_000L, 40_000L, 60_000L)
+
+val DIM_AFTER_OPTIONS_SEC = listOf(10, 15, 30, 60, 120)
 
 enum class TargetResolution(val label: String, val width: Int, val height: Int, val defaultBitRateBps: Int) {
     HD_720P("720p", 1280, 720, 4_000_000),
@@ -48,6 +56,8 @@ class CaptureSettingsRepository(private val context: Context) {
         val BUFFER_MS = longPreferencesKey("buffer_retention_ms")
         val IDLE_SCREEN = intPreferencesKey("idle_screen_ordinal")
         val CAPTURE_FPS = intPreferencesKey("capture_fps")
+        val REPLAY_DELAY_MS = longPreferencesKey("replay_delay_ms")
+        val DIM_AFTER_SEC = intPreferencesKey("dim_after_sec")
     }
 
     val settings: Flow<CaptureSettings> = context.dataStore.data.map { prefs ->
@@ -62,6 +72,8 @@ class CaptureSettingsRepository(private val context: Context) {
                 prefs[Keys.IDLE_SCREEN] ?: IdleScreenMode.DIM.ordinal,
             ) { IdleScreenMode.DIM },
             captureFps = (prefs[Keys.CAPTURE_FPS] ?: 60).takeIf { it in CAPTURE_FPS_OPTIONS } ?: 60,
+            replayDelayMs = prefs[Keys.REPLAY_DELAY_MS] ?: 25_000L,
+            dimAfterSec = (prefs[Keys.DIM_AFTER_SEC] ?: 30).takeIf { it in DIM_AFTER_OPTIONS_SEC } ?: 30,
         )
     }
 
@@ -78,4 +90,8 @@ class CaptureSettingsRepository(private val context: Context) {
     suspend fun setIdleScreen(mode: IdleScreenMode) = context.dataStore.edit { it[Keys.IDLE_SCREEN] = mode.ordinal }
 
     suspend fun setCaptureFps(fps: Int) = context.dataStore.edit { it[Keys.CAPTURE_FPS] = fps }
+
+    suspend fun setReplayDelayMs(ms: Long) = context.dataStore.edit { it[Keys.REPLAY_DELAY_MS] = ms }
+
+    suspend fun setDimAfterSec(sec: Int) = context.dataStore.edit { it[Keys.DIM_AFTER_SEC] = sec }
 }

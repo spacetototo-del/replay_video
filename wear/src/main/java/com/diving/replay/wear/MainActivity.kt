@@ -122,11 +122,11 @@ private fun WatchScreen(sender: WatchMessageSender, launch: (suspend () -> Unit)
     MaterialTheme {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                Text(if (phoneConnected) "phone ✓" else "phone ✗", color = if (phoneConnected) Color.Green else Color.Red)
+                Text(if (phoneConnected) "폰 ✓" else "폰 ✗", color = if (phoneConnected) Color.Green else Color.Red)
 
                 when (state) {
                     RecState.IDLE -> {
-                        Text("Ready", modifier = Modifier.padding(4.dp))
+                        Text("준비", modifier = Modifier.padding(4.dp))
                         Button(
                             onClick = {
                                 state = RecState.RECORDING
@@ -135,7 +135,7 @@ private fun WatchScreen(sender: WatchMessageSender, launch: (suspend () -> Unit)
                             },
                             colors = ButtonDefaults.primaryButtonColors(backgroundColor = Color.Red),
                             modifier = Modifier.size(72.dp).clip(CircleShape).padding(top = 4.dp),
-                        ) { Text("REC") }
+                        ) { Text("녹화") }
                     }
                     RecState.RECORDING -> {
                         val secs = ((tick - startedElapsed).coerceAtLeast(0)) / 1000
@@ -147,12 +147,12 @@ private fun WatchScreen(sender: WatchMessageSender, launch: (suspend () -> Unit)
                             },
                             colors = ButtonDefaults.primaryButtonColors(),
                             modifier = Modifier.size(72.dp).clip(RoundedCornerShape(12.dp)).padding(top = 4.dp),
-                        ) { Text("STOP") }
+                        ) { Text("정지") }
                     }
-                    RecState.SAVING -> Text("Saving…")
-                    RecState.DONE -> Text("Saved $ackDetail", color = Color.Green)
-                    RecState.PARTIAL -> Text("Partial $ackDetail", color = Color(0xFFFFA000))
-                    RecState.ERROR -> Text("Failed", color = Color.Red)
+                    RecState.SAVING -> Text("저장 중…")
+                    RecState.DONE -> Text("저장됨 $ackDetail", color = Color.Green)
+                    RecState.PARTIAL -> Text("일부 저장 $ackDetail", color = Color(0xFFFFA000))
+                    RecState.ERROR -> Text("실패", color = Color.Red)
                 }
             }
         }
