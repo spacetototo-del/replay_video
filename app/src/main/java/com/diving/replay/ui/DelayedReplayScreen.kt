@@ -4,13 +4,16 @@ import android.view.SurfaceView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -21,6 +24,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -29,8 +33,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import com.diving.replay.camera.RecordingService
 import com.diving.replay.data.CaptureSettingsRepository
@@ -66,9 +73,21 @@ fun DelayedReplayScreen(
     val player = remember { SegmentPlaylistPlayer(context) }
     var behindLiveMs by remember { mutableLongStateOf(0L) }
     var coverageMs by remember { mutableLongStateOf(0L) }
+    var videoAspect by remember { mutableFloatStateOf(9f / 16f) }
+    val density = LocalDensity.current
 
     DisposableEffect(Unit) {
-        onDispose { runCatching { player.release() } }
+        val sizeListener = object : Player.Listener {
+            override fun onVideoSizeChanged(vs: VideoSize) {
+                val w = (vs.width * vs.pixelWidthHeightRatio).toInt()
+                if (w > 0 && vs.height > 0) videoAspect = w.toFloat() / vs.height
+            }
+        }
+        player.exoPlayer.addListener(sizeListener)
+        onDispose {
+            player.exoPlayer.removeListener(sizeListener)
+            runCatching { player.release() }
+        }
     }
 
     // The pacing loop. Re-launched when the delay changes so the new target takes effect at once.
@@ -93,11 +112,20 @@ fun DelayedReplayScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx -> SurfaceView(ctx).also { player.exoPlayer.setVideoSurfaceView(it) } },
-        )
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            val bw = constraints.maxWidth.toFloat()
+            val bh = constraints.maxHeight.toFloat()
+            val fitByHeight = bw / bh > videoAspect
+            val vwPx = if (fitByHeight) bh * videoAspect else bw
+            val vhPx = if (fitByHeight) bh else bw / videoAspect
+            AndroidView(
+                modifier = Modifier
+                    .width(with(density) { vwPx.toDp() })
+                    .height(with(density) { vhPx.toDp() }),
+                factory = { ctx -> SurfaceView(ctx).also { player.exoPlayer.setVideoSurfaceView(it) } },
+            )
+        }
 
         val warmingUp = coverageMs < delayMs
         Box(Modifier.align(Alignment.TopStart).padding(12.dp)) {

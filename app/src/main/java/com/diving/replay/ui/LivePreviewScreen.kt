@@ -119,6 +119,10 @@ fun LivePreviewScreen(
             factory = { ctx ->
                 PreviewView(ctx).apply {
                     implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+                    // FIT_CENTER (not the default FILL_CENTER): show the whole ViewPort-cropped
+                    // frame the encoder receives, letterboxed, so the live image is exactly what
+                    // gets recorded. FILL_CENTER would crop the sides back off on tall screens.
+                    scaleType = PreviewView.ScaleType.FIT_CENTER
                     service.attachPreview(surfaceProvider)
                 }
             },
@@ -151,14 +155,21 @@ fun LivePreviewScreen(
             if (overheating) {
                 StatusPillTinted("🌡 기기 과열 — 프레임이 끊길 수 있어요. 그늘로 옮기거나 fps/해상도를 낮추세요", DivingTokens.warn, dark = true)
             }
-            (lastExport as? ClipExporter.Result.Saved)?.let {
-                val speedTag = if (it.speed != 1f) " ${it.speed}x" else ""
-                val text = if (it.partial) {
-                    "${it.savedDurationMs / 1000}초 저장됨$speedTag (일부만)"
-                } else {
-                    "${it.savedDurationMs / 1000}초 저장됨$speedTag → 갤러리"
+            when (val ex = lastExport) {
+                is ClipExporter.Result.Saved -> {
+                    val speedTag = if (ex.speed != 1f) " ${ex.speed}x" else ""
+                    val text = if (ex.partial) {
+                        "${ex.savedDurationMs / 1000}초 저장됨$speedTag (앞부분 일부 잘림)"
+                    } else {
+                        "${ex.savedDurationMs / 1000}초 저장됨$speedTag → 갤러리"
+                    }
+                    StatusPillTinted(text, DivingTokens.ok, dark = true)
                 }
-                StatusPillTinted(text, DivingTokens.ok, dark = true)
+                is ClipExporter.Result.Failed ->
+                    StatusPillTinted("저장 실패 — 다시 시도하세요", MaterialTheme.colorScheme.error)
+                ClipExporter.Result.NothingToSave ->
+                    StatusPillTinted("구간을 저장하지 못했어요 — 너무 짧거나 버퍼 범위를 벗어났어요", MaterialTheme.colorScheme.error)
+                null -> Unit
             }
         }
 

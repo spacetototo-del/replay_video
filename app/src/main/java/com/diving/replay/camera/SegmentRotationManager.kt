@@ -26,6 +26,15 @@ class SegmentRotationManager(
     private val lock = ReentrantLock()
     private val live = ArrayDeque<Segment>()
 
+    /**
+     * While > 0, pruning is suspended: the rewind screen snapshots the buffer on entry and cuts
+     * an export against those exact files, so deleting them out from under it turns a "save this
+     * 8-second dive" into "saved 2 seconds (partial)". Held only while that screen is open; a
+     * catch-up prune runs on release. Balanced with [holdPrune]/[releasePrune].
+     */
+    @Volatile
+    private var pruneHold = 0
+
     private val _segments = MutableStateFlow<List<Segment>>(emptyList())
     val segments: StateFlow<List<Segment>> = _segments.asStateFlow()
 
@@ -56,7 +65,18 @@ class SegmentRotationManager(
         publish()
     }
 
+    /** Suspend pruning (rewind screen open). Always pair with [releasePrune]. */
+    fun holdPrune() = lock.withLock { pruneHold++ }
+
+    /** Resume pruning and immediately catch up on anything that went stale while held. */
+    fun releasePrune() = lock.withLock {
+        if (pruneHold > 0) pruneHold--
+        pruneLocked(System.currentTimeMillis())
+        publish()
+    }
+
     private fun pruneLocked(now: Long) {
+        if (pruneHold > 0) return
         val cutoff = now - (retentionMs + Constants.BUFFER_SAFETY_MARGIN_MS)
         while (live.isNotEmpty()) {
             val head = live.first()

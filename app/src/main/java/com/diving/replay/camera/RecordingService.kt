@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import android.util.Range
+import android.util.Rational
 import android.view.Surface
 import android.view.WindowManager
 import androidx.annotation.RequiresApi
@@ -19,6 +20,8 @@ import androidx.annotation.RequiresPermission
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.ViewPort
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FileOutputOptions
 import androidx.camera.video.Quality
@@ -178,6 +181,10 @@ class RecordingService : LifecycleService() {
 
     fun bufferCoverageMs(): Long = rotation.coverageMs()
 
+    /** The rewind screen calls these so its snapshotted segments aren't pruned mid-selection. */
+    fun holdBuffer() = rotation.holdPrune()
+    fun releaseBuffer() = rotation.releasePrune()
+
     /**
      * Keep recorded files upright. Only the Activity has a visual context that knows the real
      * display rotation, so it pushes the value down; CameraX applies it without a rebind.
@@ -271,7 +278,20 @@ class RecordingService : LifecycleService() {
         // would otherwise stack a new observer on each pass.
         camera?.cameraInfo?.zoomState?.removeObservers(this)
         provider.unbindAll()
-        camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture)
+        // Bind preview + capture under one ViewPort so they share a field of view. Without it
+        // CameraX gives each use case its own crop rect and the live preview shows a wider frame
+        // than what actually lands in the recorded file — "the ends get cut off". 9:16 matches
+        // every QualitySelector option (all 16:9); the preview surface is letterboxed to it by
+        // PreviewView's FIT_CENTER so the live image is exactly what gets recorded.
+        val viewPort = ViewPort.Builder(Rational(9, 16), targetRotation)
+            .setScaleType(ViewPort.FILL_CENTER)
+            .build()
+        val useCaseGroup = UseCaseGroup.Builder()
+            .setViewPort(viewPort)
+            .addUseCase(preview)
+            .addUseCase(capture)
+            .build()
+        camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, useCaseGroup)
         camera?.cameraInfo?.zoomState?.observe(this) { zs ->
             _zoom.value = ZoomInfo(zs.zoomRatio, zs.minZoomRatio, zs.maxZoomRatio)
         }
@@ -359,6 +379,11 @@ class RecordingService : LifecycleService() {
             if (notifyWatch) watchAck.send(WatchAck.Kind.ERROR, "저장 중")
             return
         }
+        // Pin the buffer for the whole export. The rewind screen releases its own hold the
+        // instant it closes — which is right after it calls this — so without a second hold
+        // here the catch-up prune can delete the very segments this export still needs. That
+        // showed up as "구간이 버퍼에 없어요" on short selections and as truncated saves.
+        rotation.holdPrune()
         lifecycleScope.launch {
             try {
                 _state.value = State.EXPORTING
@@ -378,6 +403,7 @@ class RecordingService : LifecycleService() {
                     }
                 }
             } finally {
+                rotation.releasePrune()
                 exportLock.unlock()
                 _state.value = if (segmentLoop?.isActive == true) State.BUFFERING else State.ERROR
                 updateNotification()

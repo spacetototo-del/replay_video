@@ -45,10 +45,13 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import com.diving.replay.camera.RecordingService
 import com.diving.replay.playback.SegmentPlaylistPlayer
@@ -90,6 +93,9 @@ fun RewindScrubScreen(
     var viewScale by remember { mutableFloatStateOf(1f) }
     var viewOffsetX by remember { mutableFloatStateOf(0f) }
     var viewOffsetY by remember { mutableFloatStateOf(0f) }
+    // width/height of the decoded video — used to letterbox instead of stretching to the box.
+    var videoAspect by remember { mutableFloatStateOf(9f / 16f) }
+    val density = LocalDensity.current
 
     fun seekTimeline(ms: Long) {
         val clamped = ms.coerceIn(0L, totalMs)
@@ -104,13 +110,27 @@ fun RewindScrubScreen(
     }
 
     DisposableEffect(Unit) {
+        // Freeze pruning while this screen is open, so the range the user picks is still on disk
+        // when they hit save.
+        service.holdBuffer()
+        val sizeListener = object : Player.Listener {
+            override fun onVideoSizeChanged(vs: VideoSize) {
+                val w = (vs.width * vs.pixelWidthHeightRatio).toInt()
+                if (w > 0 && vs.height > 0) videoAspect = w.toFloat() / vs.height
+            }
+        }
+        player.exoPlayer.addListener(sizeListener)
         // snapshot the buffer once, on entry
         runCatching {
             player.load(service.segments.value)
             totalMs = player.totalDurationMs
             player.seekToTimeline(totalMs)
         }.onFailure { Log.e("RewindScrub", "player load failed", it) }
-        onDispose { runCatching { player.release() } }
+        onDispose {
+            player.exoPlayer.removeListener(sizeListener)
+            service.releaseBuffer()
+            runCatching { player.release() }
+        }
     }
 
     // While playing, let the bar follow the playhead (unless a finger is on it). With A–B on,
@@ -152,17 +172,11 @@ fun RewindScrubScreen(
             }
             Button(modifier = Modifier.fillMaxWidth(), onClick = onBackToLive) { Text("라이브로 돌아가기") }
         } else {
-            AndroidView(
-                modifier = Modifier
+            BoxWithConstraints(
+                Modifier
                     .fillMaxWidth()
                     .weight(1f)
                     .clipToBounds()
-                    .graphicsLayer {
-                        scaleX = viewScale
-                        scaleY = viewScale
-                        translationX = viewOffsetX
-                        translationY = viewOffsetY
-                    }
                     // Two fingers pan/zoom the frame; a single tap toggles playback. Splitting on
                     // pointer count keeps the two from stealing each other's gestures — same
                     // approach as the live screen's pinch-vs-swipe.
@@ -204,10 +218,29 @@ fun RewindScrubScreen(
                             }
                         }
                     },
-                factory = { ctx ->
-                    SurfaceView(ctx).also { sv -> player.exoPlayer.setVideoSurfaceView(sv) }
-                },
-            )
+                contentAlignment = Alignment.Center,
+            ) {
+                // Fit the video inside the box at its real aspect ratio (letterbox), not stretched.
+                val bw = constraints.maxWidth.toFloat()
+                val bh = constraints.maxHeight.toFloat()
+                val fitByHeight = bw / bh > videoAspect
+                val vwPx = if (fitByHeight) bh * videoAspect else bw
+                val vhPx = if (fitByHeight) bh else bw / videoAspect
+                AndroidView(
+                    modifier = Modifier
+                        .width(with(density) { vwPx.toDp() })
+                        .height(with(density) { vhPx.toDp() })
+                        .graphicsLayer {
+                            scaleX = viewScale
+                            scaleY = viewScale
+                            translationX = viewOffsetX
+                            translationY = viewOffsetY
+                        },
+                    factory = { ctx ->
+                        SurfaceView(ctx).also { sv -> player.exoPlayer.setVideoSurfaceView(sv) }
+                    },
+                )
+            }
 
             // Fixed-height track so the marker overlays can't stretch the layout.
             BoxWithConstraints(
