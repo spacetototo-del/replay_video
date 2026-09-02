@@ -16,8 +16,9 @@ data class CaptureSettings(
     val bitRateBps: Int = TargetResolution.FHD_1080P.defaultBitRateBps,
     val bufferRetentionMs: Long = com.diving.replay.Constants.BUFFER_RETENTION_MS,
     val idleScreen: IdleScreenMode = IdleScreenMode.DIM,
-    /** Buffer capture frame rate. 60 = smooth 0.5x slow-mo on playback. 120 = best-effort. */
-    val captureFps: Int = 60,
+    /** Buffer capture frame rate. 30 = lightest on battery (default). 60 = smooth 0.5x slow-mo
+     *  on playback. 120 = best-effort. */
+    val captureFps: Int = 30,
     /** How far behind live the delayed-replay screen runs — long enough to climb out and look. */
     val replayDelayMs: Long = 25_000L,
     /** Seconds with no screen touch before the display dims / turns off (DIM / SCREEN_OFF modes). */
@@ -71,7 +72,7 @@ class CaptureSettingsRepository(private val context: Context) {
             idleScreen = IdleScreenMode.entries.getOrElse(
                 prefs[Keys.IDLE_SCREEN] ?: IdleScreenMode.DIM.ordinal,
             ) { IdleScreenMode.DIM },
-            captureFps = (prefs[Keys.CAPTURE_FPS] ?: 60).takeIf { it in CAPTURE_FPS_OPTIONS } ?: 60,
+            captureFps = (prefs[Keys.CAPTURE_FPS] ?: 30).takeIf { it in CAPTURE_FPS_OPTIONS } ?: 30,
             replayDelayMs = prefs[Keys.REPLAY_DELAY_MS] ?: 25_000L,
             dimAfterSec = (prefs[Keys.DIM_AFTER_SEC] ?: 30).takeIf { it in DIM_AFTER_OPTIONS_SEC } ?: 30,
         )

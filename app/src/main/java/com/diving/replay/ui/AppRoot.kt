@@ -22,12 +22,14 @@ enum class Screen { LIVE, REWIND, DELAYED, CLIPS, SETTINGS }
 /**
  * @param onHoldScreenAwake raised while a screen is being *watched* rather than operated, so the
  *   idle dimmer doesn't darken a replay nobody is touching.
+ * @param onExitApp stop the buffer service and close the app (Settings → 종료).
  */
 @UnstableApi
 @Composable
 fun AppRoot(
     service: RecordingService?,
     onHoldScreenAwake: (Boolean) -> Unit = {},
+    onExitApp: () -> Unit = {},
 ) {
     var screen by remember { mutableStateOf(Screen.LIVE) }
 
@@ -66,7 +68,7 @@ fun AppRoot(
                         onBackToLive = { screen = Screen.LIVE },
                     )
                     Screen.CLIPS -> ClipListScreen(onBack = { screen = Screen.LIVE })
-                    Screen.SETTINGS -> SettingsScreen(onBack = { screen = Screen.LIVE })
+                    Screen.SETTINGS -> SettingsScreen(onBack = { screen = Screen.LIVE }, onExitApp = onExitApp)
                 }
             }
         }

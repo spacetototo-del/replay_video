@@ -2,6 +2,8 @@ package com.diving.replay.camera
 
 import android.Manifest
 import android.app.Notification
+import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -37,6 +39,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
 import com.diving.replay.Constants
 import com.diving.replay.DivingReplayApp
+import com.diving.replay.MainActivity
 import com.diving.replay.R
 import com.diving.replay.data.CaptureSettings
 import com.diving.replay.data.CaptureSettingsRepository
@@ -44,8 +47,10 @@ import com.diving.replay.data.TargetResolution
 import com.diving.replay.util.awaitCompat
 import com.diving.replay.wear.WatchAck
 import com.diving.replay.wear.WatchMessageListenerService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -57,6 +62,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeout
 import java.io.File
 
 /**
@@ -110,7 +116,7 @@ class RecordingService : LifecycleService() {
     val zoom: StateFlow<ZoomInfo> = _zoom.asStateFlow()
 
     /** Capture frame rate currently in effect — the rewind screen uses it for frame-stepping. */
-    private val _captureFps = MutableStateFlow(60)
+    private val _captureFps = MutableStateFlow(30)
     val captureFps: StateFlow<Int> = _captureFps.asStateFlow()
 
     /** False when RECORD_AUDIO is missing, so the UI can say the buffer is silent. */
@@ -145,17 +151,47 @@ class RecordingService : LifecycleService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        if (intent?.action == ACTION_STOP) {
+            stopEverything()
+            return START_NOT_STICKY
+        }
         if (segmentLoop == null && hasCameraPermission()) startBuffering()
         when (intent?.action) {
             WatchMessageListenerService.ACTION_MARK_START -> onMarkStart()
             WatchMessageListenerService.ACTION_MARK_END -> onMarkEnd()
         }
-        return START_STICKY
+        // NOT sticky: if the system kills this for memory, it should stay dead until the user
+        // reopens the app. A camera foreground service silently resurrecting itself with no UI
+        // on screen is exactly how a field test lost ~25% of the battery in three hours.
+        return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent): IBinder {
         super.onBind(intent)
         return binder
+    }
+
+    /**
+     * The user dismissed the app from recents. The rolling buffer is a convenience, not a reason
+     * to keep the camera and a foreground service running behind their back — shut it all down.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.i(TAG, "task removed — shutting the buffer service down")
+        stopEverything()
+        super.onTaskRemoved(rootIntent)
+    }
+
+    /** Stop entry point for the in-app "종료" button. */
+    fun requestStop() = stopEverything()
+
+    private fun stopEverything() {
+        segmentLoop?.cancel()
+        segmentLoop = null
+        runCatching { activeRecording?.close() }
+        activeRecording = null
+        runCatching { cameraProvider?.unbindAll() }
+        stopForeground(Service.STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     // ---- preview wiring for the Activity ----
@@ -243,11 +279,23 @@ class RecordingService : LifecycleService() {
                     try {
                         recordOneSegment()
                         consecutiveFailures = 0
-                    } catch (e: IllegalStateException) {
-                        // Recorder not ready yet between segments — back off briefly and retry.
-                        Log.w(TAG, "segment start retry (${++consecutiveFailures})", e)
-                        if (consecutiveFailures >= 5) throw e
-                        delay(300)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // A wedged Recorder — e.g. another app grabbed the camera mid-segment and
+                        // CameraX is stuck "waiting for a video keyframe", pinning the CPU and
+                        // never finalizing — won't heal by trying the next segment on the same
+                        // session. Tear the camera down, back off, rebind. Never give up for
+                        // good: the camera almost always comes back once the other app releases.
+                        consecutiveFailures++
+                        Log.w(TAG, "segment failed ($consecutiveFailures) — rebinding camera", e)
+                        runCatching { activeRecording?.close() }
+                        activeRecording = null
+                        _state.value = State.STARTING
+                        delay(minOf(consecutiveFailures * 1500L, 8_000L))
+                        runCatching { bindCamera(settingsRepo.settings.first()) }
+                            .onSuccess { _state.value = State.BUFFERING }
+                            .onFailure { Log.w(TAG, "rebind failed; retrying next loop", it) }
                     }
                     rotation.prune()
                 }
@@ -347,7 +395,17 @@ class RecordingService : LifecycleService() {
 
         delay(Constants.SEGMENT_DURATION_MS)
         recording.stop()
-        finalized.await()
+        // Guard the finalize wait. If the camera was lost mid-segment the Finalize event may
+        // never arrive: the Recorder just sits there caching audio and burning the CPU. Time it
+        // out and let the buffering loop rebuild the camera.
+        try {
+            withTimeout(Constants.SEGMENT_DURATION_MS / 2) { finalized.await() }
+        } catch (e: TimeoutCancellationException) {
+            runCatching { recording.close() }
+            activeRecording = null
+            file.delete()
+            throw IllegalStateException("segment finalize timed out — camera lost?")
+        }
         activeRecording = null
     }
 
@@ -415,8 +473,9 @@ class RecordingService : LifecycleService() {
         instance = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) unregisterThermalListener()
         segmentLoop?.cancel()
-        activeRecording?.stop()
-        cameraProvider?.unbindAll()
+        runCatching { activeRecording?.close() }
+        activeRecording = null
+        runCatching { cameraProvider?.unbindAll() }
         super.onDestroy()
     }
 
@@ -485,18 +544,33 @@ class RecordingService : LifecycleService() {
             State.ERROR -> "버퍼 중지됨 — 앱을 다시 여세요"
             else -> if (markers.isArmed) "녹화 중 — 버퍼링" else getString(R.string.notif_recording_text)
         }
+        val openApp = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE,
+        )
+        val stop = PendingIntent.getService(
+            this, 1,
+            Intent(this, RecordingService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
         return NotificationCompat.Builder(this, DivingReplayApp.CHANNEL_RECORDING)
             .setContentTitle(getString(R.string.notif_recording_title))
             .setContentText(text)
             .setSmallIcon(android.R.drawable.presence_video_online)
             .setOngoing(true)
             .setSilent(true)
+            .setContentIntent(openApp)
+            .addAction(0, "종료", stop)
             .build()
     }
 
     companion object {
         private const val TAG = "RecordingService"
         private const val NOTIF_ID = 42
+
+        /** Notification "종료" action / in-app quit: stop the buffer and the service outright. */
+        const val ACTION_STOP = "com.diving.replay.action.STOP"
 
         /**
          * The live instance while the service is running, or null.

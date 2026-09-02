@@ -96,6 +96,10 @@ class MainActivity : ComponentActivity() {
             AppRoot(
                 service = service,
                 onHoldScreenAwake = { wake.holdAwake = it },
+                onExitApp = {
+                    service?.requestStop()
+                    finishAndRemoveTask()
+                },
             )
         }
 

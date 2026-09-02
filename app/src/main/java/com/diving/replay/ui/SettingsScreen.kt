@@ -12,6 +12,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowBackIosNew
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -43,7 +45,7 @@ import kotlinx.coroutines.launch
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onExitApp: () -> Unit = {}) {
     val context = LocalContext.current
     val repo = remember { CaptureSettingsRepository(context) }
     val scope = rememberCoroutineScope()
@@ -84,7 +86,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 Hint("같은 해상도라도 높이면 화질이 좋아지고 용량이 늘어요.")
             }
 
-            val currentFps = s?.captureFps ?: 60
+            val currentFps = s?.captureFps ?: 30
             SettingCard {
                 SectionLabel("촬영 프레임레이트")
                 ChipRow {
@@ -92,7 +94,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                         ChoiceChip("${fps}fps", fps == currentFps) { scope.launch { repo.setCaptureFps(fps) } }
                     }
                 }
-                Hint("60fps면 0.5배속 슬로모션이 부드러워요. 120은 실험적이라 기기가 무시할 수 있어요. 바꾸면 버퍼가 초기화됩니다.")
+                Hint("30fps가 기본이고 배터리에 가장 유리해요. 60fps면 0.5배속 슬로모션이 부드럽지만 전력을 더 씁니다. 120은 실험적이라 기기가 무시할 수 있어요. 바꾸면 버퍼가 초기화됩니다.")
             }
 
             val currentBuffer = s?.bufferRetentionMs ?: Constants.BUFFER_RETENTION_MS
@@ -141,6 +143,19 @@ fun SettingsScreen(onBack: () -> Unit) {
                     }
                 }
                 Hint("이 시간 동안 화면을 안 건드리면 어두워집니다. (‘대기 화면’이 항상 밝게면 적용 안 됨)")
+            }
+
+            SettingCard {
+                SectionLabel("앱 종료")
+                Hint("버퍼 녹화를 멈추고 카메라를 놓은 뒤 앱을 완전히 닫습니다. 그냥 홈으로 나가거나 최근 앱에서 밀어내도 이제 종료되지만, 확실히 끄려면 이 버튼을 쓰세요.")
+                Button(
+                    onClick = onExitApp,
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) { Text("종료") }
             }
         }
     }
