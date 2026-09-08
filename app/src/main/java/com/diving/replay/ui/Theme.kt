@@ -23,6 +23,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -192,7 +193,13 @@ fun ChoiceChip(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** An icon + label control for the live-screen bottom bar. Grows to share width evenly. */
+/**
+ * An icon + label control for the live-screen bottom bar. Grows to share width evenly.
+ *
+ * [contentRotation] turns just the icon so it stays upright when the phone is held sideways —
+ * the activity is portrait-locked, so nothing else rotates. Rotating a 24dp glyph in place is
+ * clean; the label is left horizontal (turning wrapped 2-line text in a fixed slot would clip).
+ */
 @Composable
 fun BarAction(
     icon: ImageVector,
@@ -200,6 +207,7 @@ fun BarAction(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.onSurface,
+    contentRotation: Float = 0f,
 ) {
     Surface(
         onClick = onClick,
@@ -213,7 +221,11 @@ fun BarAction(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            Icon(icon, contentDescription = label, modifier = Modifier.padding(bottom = 1.dp))
+            Icon(
+                icon,
+                contentDescription = label,
+                modifier = Modifier.padding(bottom = 1.dp).rotate(contentRotation),
+            )
             Text(
                 label,
                 fontSize = 11.sp,

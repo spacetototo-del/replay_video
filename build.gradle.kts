@@ -17,7 +17,7 @@ val apkExportDir = rootProject.projectDir.parentFile.resolve("apk")
 // THE single place the version is written. The modules read it from rootProject.extra to derive
 // versionName/versionCode and the launcher label, and the UI reads BuildConfig — so bumping this
 // one line is the whole release. (It used to be four places that could silently disagree.)
-val appVersionLabel by extra("v12")
+val appVersionLabel by extra("v13")
 
 subprojects {
     layout.buildDirectory.set(file("$syncSafeRoot/DivingReplayBuild/${rootProject.name}/${project.name}"))

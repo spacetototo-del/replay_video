@@ -36,6 +36,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
@@ -75,6 +76,9 @@ fun LivePreviewScreen(
     val haptics = LocalHapticFeedback.current
     var zoomLocked by remember { mutableStateOf(false) }
     val coverageSec = remember(segments) { (service.bufferCoverageMs() / 1000).toInt() }
+    // Activity is portrait-locked; turn the overlay controls to stay upright in the hand. Purely
+    // visual — the camera and the recorded file are unaffected.
+    val upright = rememberUprightRotation()
 
     Box(
         Modifier
@@ -131,7 +135,7 @@ fun LivePreviewScreen(
 
         // top-left: version + status, then warnings and the "saved" toast stacked underneath
         Column(
-            Modifier.align(Alignment.TopStart).padding(12.dp),
+            Modifier.align(Alignment.TopStart).padding(12.dp).rotate(upright),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             val statusText = buildString {
@@ -178,6 +182,7 @@ fun LivePreviewScreen(
             Modifier
                 .align(Alignment.TopEnd)
                 .padding(12.dp)
+                .rotate(upright)
                 .pointerInput(zoomLocked) {
                     awaitEachGesture {
                         awaitFirstDown()
@@ -224,7 +229,7 @@ fun LivePreviewScreen(
                         contentColor = androidx.compose.ui.graphics.Color.White,
                     ),
                 ) {
-                    Icon(Icons.Rounded.FiberManualRecord, contentDescription = null)
+                    Icon(Icons.Rounded.FiberManualRecord, contentDescription = null, modifier = Modifier.rotate(upright))
                     Text("  녹화 시작", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 }
             } else {
@@ -236,16 +241,16 @@ fun LivePreviewScreen(
                     modifier = Modifier.fillMaxWidth().height(52.dp),
                     shape = RoundedCornerShape(DivingTokens.chipRadius),
                 ) {
-                    Icon(Icons.Rounded.Stop, contentDescription = null)
+                    Icon(Icons.Rounded.Stop, contentDescription = null, modifier = Modifier.rotate(upright))
                     Text("  정지", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                BarAction(Icons.Rounded.ContentCut, "되감기·구간저장", onEnterRewind, Modifier.weight(1f))
-                BarAction(Icons.Rounded.HistoryToggleOff, "지연재생", onEnterDelayed, Modifier.weight(1f))
-                BarAction(Icons.Rounded.VideoLibrary, "저장영상", onOpenClips, Modifier.weight(1f))
-                BarAction(Icons.Rounded.Settings, "설정", onOpenSettings, Modifier.weight(1f))
+                BarAction(Icons.Rounded.ContentCut, "되감기·구간저장", onEnterRewind, Modifier.weight(1f), contentRotation = upright)
+                BarAction(Icons.Rounded.HistoryToggleOff, "지연재생", onEnterDelayed, Modifier.weight(1f), contentRotation = upright)
+                BarAction(Icons.Rounded.VideoLibrary, "저장영상", onOpenClips, Modifier.weight(1f), contentRotation = upright)
+                BarAction(Icons.Rounded.Settings, "설정", onOpenSettings, Modifier.weight(1f), contentRotation = upright)
             }
         }
     }
