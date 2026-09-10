@@ -36,7 +36,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
@@ -76,9 +75,9 @@ fun LivePreviewScreen(
     val haptics = LocalHapticFeedback.current
     var zoomLocked by remember { mutableStateOf(false) }
     val coverageSec = remember(segments) { (service.bufferCoverageMs() / 1000).toInt() }
-    // Activity is portrait-locked; turn the overlay controls to stay upright in the hand. Purely
-    // visual — the camera and the recorded file are unaffected.
-    val upright = rememberUprightRotation()
+    // Activity is portrait-locked; the overlay controls dock to the physical bottom/top edge and
+    // turn to follow the phone. Purely visual — the camera and the recorded file are unaffected.
+    val orientation = rememberUprightOrientation()
 
     Box(
         Modifier
@@ -134,8 +133,9 @@ fun LivePreviewScreen(
         DisposableEffect(Unit) { onDispose { service.detachPreview() } }
 
         // top-left: version + status, then warnings and the "saved" toast stacked underneath
+        RotatedEdge(orientation, Alignment.TopStart) {
         Column(
-            Modifier.align(Alignment.TopStart).padding(12.dp).rotate(upright),
+            Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             val statusText = buildString {
@@ -176,13 +176,13 @@ fun LivePreviewScreen(
                 null -> Unit
             }
         }
+        }
 
-        // top-right: zoom + lock
+        // top-right: zoom + lock — docks to the physical top edge and turns with the phone
+        RotatedEdge(orientation, Alignment.TopEnd) {
         Box(
             Modifier
-                .align(Alignment.TopEnd)
                 .padding(12.dp)
-                .rotate(upright)
                 .pointerInput(zoomLocked) {
                     awaitEachGesture {
                         awaitFirstDown()
@@ -204,16 +204,20 @@ fun LivePreviewScreen(
                 color = MaterialTheme.colorScheme.onSurface,
             )
         }
+        }
 
-        // bottom: prominent record button + an evenly-shared action bar. Width-capped and
-        // centred so it never clusters or stretches on a tablet / unfolded Fold, and each
-        // action takes an equal weight so it stays balanced on the narrow Fold cover screen.
+        // bottom: record button + an evenly-shared action bar. RotatedEdge docks it to the
+        // physical bottom edge and turns it with the phone, so it slides round to the new
+        // bottom in landscape rather than staying stuck along the portrait edge. Width-capped
+        // and centred so it never stretches on a tablet.
+        RotatedEdge(orientation, Alignment.BottomCenter) {
         Column(
             Modifier
-                .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .widthIn(max = DivingTokens.contentMaxWidth)
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+                // Kept fairly tight so that when it turns sideways the strip doesn't run the
+                // whole length of the screen edge.
+                .widthIn(max = 440.dp)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             if (armedFrom == null) {
@@ -229,7 +233,7 @@ fun LivePreviewScreen(
                         contentColor = androidx.compose.ui.graphics.Color.White,
                     ),
                 ) {
-                    Icon(Icons.Rounded.FiberManualRecord, contentDescription = null, modifier = Modifier.rotate(upright))
+                    Icon(Icons.Rounded.FiberManualRecord, contentDescription = null)
                     Text("  녹화 시작", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 }
             } else {
@@ -241,17 +245,18 @@ fun LivePreviewScreen(
                     modifier = Modifier.fillMaxWidth().height(52.dp),
                     shape = RoundedCornerShape(DivingTokens.chipRadius),
                 ) {
-                    Icon(Icons.Rounded.Stop, contentDescription = null, modifier = Modifier.rotate(upright))
+                    Icon(Icons.Rounded.Stop, contentDescription = null)
                     Text("  정지", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                BarAction(Icons.Rounded.ContentCut, "되감기·구간저장", onEnterRewind, Modifier.weight(1f), contentRotation = upright)
-                BarAction(Icons.Rounded.HistoryToggleOff, "지연재생", onEnterDelayed, Modifier.weight(1f), contentRotation = upright)
-                BarAction(Icons.Rounded.VideoLibrary, "저장영상", onOpenClips, Modifier.weight(1f), contentRotation = upright)
-                BarAction(Icons.Rounded.Settings, "설정", onOpenSettings, Modifier.weight(1f), contentRotation = upright)
+                BarAction(Icons.Rounded.ContentCut, "되감기", onEnterRewind, Modifier.weight(1f))
+                BarAction(Icons.Rounded.HistoryToggleOff, "지연재생", onEnterDelayed, Modifier.weight(1f))
+                BarAction(Icons.Rounded.VideoLibrary, "저장영상", onOpenClips, Modifier.weight(1f))
+                BarAction(Icons.Rounded.Settings, "설정", onOpenSettings, Modifier.weight(1f))
             }
+        }
         }
     }
 }

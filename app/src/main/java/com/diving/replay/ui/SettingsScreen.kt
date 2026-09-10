@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.FlowRowScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -28,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.diving.replay.Constants
@@ -52,8 +54,19 @@ fun SettingsScreen(onBack: () -> Unit, onExitApp: () -> Unit = {}) {
     val settings by repo.settings.collectAsState(initial = null)
     val s = settings
 
+    // Peak disk the rolling buffer will hold while recording, vs. what's free on the volume that
+    // stores it. Video dominates (bitrate = bits/sec, so fps doesn't change size at a fixed
+    // bitrate); +128 kbps audio, +5% container overhead, + the full safety margin.
+    val bitRate = s?.bitRateBps ?: (s?.resolution ?: TargetResolution.FHD_1080P).defaultBitRateBps
+    val bufferMs = s?.bufferRetentionMs ?: Constants.BUFFER_RETENTION_MS
+    val peakBufferBytes = remember(bitRate, bufferMs) {
+        ((bitRate + 128_000) / 8.0 *
+            ((bufferMs + Constants.BUFFER_SAFETY_MARGIN_MS) / 1000.0) * 1.05).toLong()
+    }
+    val freeBytes = remember { context.filesDir.usableSpace }
+
     ScreenScaffold {
-        ScreenHeader("설정", onBack)
+        SettingsHeader(onBack, peakBufferBytes, freeBytes)
 
         Column(
             Modifier
@@ -107,7 +120,7 @@ fun SettingsScreen(onBack: () -> Unit, onExitApp: () -> Unit = {}) {
                         }
                     }
                 }
-                Hint("최근 이만큼을 되감을 수 있어요. 지난 영상은 자동으로 지워집니다.")
+                Hint("최근 이만큼을 되감을 수 있어요. 지난 영상은 자동으로 지워집니다. 촬영 중 필요한 최대 저장공간은 상단 우측에 표시됩니다 (비트레이트 × 버퍼 길이 기준).")
             }
 
             val currentDelay = s?.replayDelayMs ?: 25_000L
@@ -162,7 +175,7 @@ fun SettingsScreen(onBack: () -> Unit, onExitApp: () -> Unit = {}) {
 }
 
 @Composable
-private fun ScreenHeader(title: String, onBack: () -> Unit) {
+private fun SettingsHeader(onBack: () -> Unit, peakBufferBytes: Long, freeBytes: Long) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -172,13 +185,39 @@ private fun ScreenHeader(title: String, onBack: () -> Unit) {
             Text("라이브")
         }
         Text(
-            title,
+            "설정",
             modifier = Modifier.padding(start = 4.dp),
             fontSize = 20.sp,
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.onBackground,
         )
+        Spacer(Modifier.weight(1f))
+        val tight = peakBufferBytes > freeBytes
+        Column(
+            horizontalAlignment = Alignment.End,
+            modifier = Modifier.padding(end = 8.dp),
+        ) {
+            Text(
+                "필요 최대 ≈ ${humanBytes(peakBufferBytes)}",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.End,
+                color = if (tight) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onBackground,
+            )
+            Text(
+                "남은 공간 ${humanBytes(freeBytes)}",
+                fontSize = 11.sp,
+                textAlign = TextAlign.End,
+                color = if (tight) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
+}
+
+/** 1000-based, like the Android storage UI. */
+private fun humanBytes(b: Long): String {
+    val gb = b / 1_000_000_000.0
+    return if (gb >= 1.0) "%.1f GB".format(gb) else "%.0f MB".format(b / 1_000_000.0)
 }
 
 @OptIn(ExperimentalLayoutApi::class)

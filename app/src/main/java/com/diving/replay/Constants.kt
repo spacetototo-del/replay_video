@@ -26,7 +26,9 @@ object Constants {
     const val SEGMENT_DURATION_MS = 15_000L
 
     /** Buffer retention presets offered in Settings (ms). */
-    val BUFFER_PRESETS_MS = longArrayOf(2 * 60_000L, 3 * 60_000L, 5 * 60_000L)
+    val BUFFER_PRESETS_MS = longArrayOf(
+        2 * 60_000L, 3 * 60_000L, 5 * 60_000L, 10 * 60_000L, 20 * 60_000L, 30 * 60_000L,
+    )
 
     const val SEGMENT_DIR = "buffer"
     const val EXPORT_RELATIVE_DIR = "Movies/DivingReplay"
