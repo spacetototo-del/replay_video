@@ -48,5 +48,17 @@
             </intent-filter>
         </service>
 
+        <!-- Lets Settings share DiagnosticLog's export_errors.log via a content:// URI, so a
+             save failure at the pool/gym can be sent (KakaoTalk, email, ...) without a PC. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
     </application>
 </manifest>

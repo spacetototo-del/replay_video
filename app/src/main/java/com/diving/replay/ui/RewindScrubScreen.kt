@@ -20,11 +20,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -65,6 +69,10 @@ import kotlin.math.abs
  * are still being recorded. Flow: drag the bar to preview frames → let go and it plays forward
  * from there so you can confirm the spot → tap "Set start" / "Set end" at the two moments you
  * want → "Save start–end" exports just that span. Tap the video to pause/resume.
+ *
+ * The whole screen turns with the phone (RotatedEdge, [Alignment.Center]) — the activity is
+ * portrait-locked, but a long buffer needs every pixel of track width it can get to pick a start
+ * and end point precisely, and holding the phone sideways is exactly when there's more of it.
  */
 @UnstableApi
 @OptIn(ExperimentalLayoutApi::class)
@@ -78,6 +86,7 @@ fun RewindScrubScreen(
     val player = remember { SegmentPlaylistPlayer(context) }
     val fps by service.captureFps.collectAsState()
     val frameMs = (1000L / fps).coerceAtLeast(1L)
+    val orientation = rememberUprightOrientation()
 
     var scrub by remember { mutableFloatStateOf(1f) }
     var dragging by remember { mutableStateOf(false) }
@@ -87,6 +96,9 @@ fun RewindScrubScreen(
     var endFraction by remember { mutableStateOf<Float?>(null) }
     var totalMs by remember { mutableLongStateOf(0L) }
     var loopAb by remember { mutableStateOf(false) }
+    // Pinch-to-zoom on the *track* (not the video): lets a long buffer be scrubbed precisely
+    // instead of every finger-width covering minutes of footage. See TimelineZoom for the math.
+    var tz by remember { mutableStateOf(TimelineZoom()) }
 
     // Playback-side zoom: inspect entry angle without re-shooting. Separate from the live
     // camera zoom — this only magnifies the decoded frame, it changes nothing on disk.
@@ -160,215 +172,358 @@ fun RewindScrubScreen(
                         break
                     }
                 }
+                // Keep the playhead on-screen while zoomed in, instead of it running off the
+                // edge of the visible window and just vanishing.
+                if (!tz.isVisible(scrub)) tz = tz.centeredOn(scrub)
             }
             delay(100)
         }
     }
 
-    Column(Modifier.fillMaxSize().padding(12.dp)) {
-        if (totalMs <= 0L) {
-            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                Text("아직 녹화된 영상이 없어요 — 잠시 녹화되게 두고 다시 오세요.")
-            }
-            Button(modifier = Modifier.fillMaxWidth(), onClick = onBackToLive) { Text("라이브로 돌아가기") }
-        } else {
-            BoxWithConstraints(
-                Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .clipToBounds()
-                    // Two fingers pan/zoom the frame; a single tap toggles playback. Splitting on
-                    // pointer count keeps the two from stealing each other's gestures — same
-                    // approach as the live screen's pinch-vs-swipe.
-                    .pointerInput(Unit) {
-                        awaitEachGesture {
-                            awaitFirstDown(requireUnconsumed = false)
-                            var multiTouch = false
-                            var moved = false
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                val pressed = event.changes.count { it.pressed }
-                                if (pressed == 0) break
-                                if (pressed >= 2) {
-                                    multiTouch = true
-                                    val zoomChange = event.calculateZoom()
-                                    val panChange = event.calculatePan()
-                                    viewScale = (viewScale * zoomChange).coerceIn(1f, 6f)
-                                    if (viewScale > 1f) {
-                                        viewOffsetX += panChange.x
-                                        viewOffsetY += panChange.y
-                                    } else {
-                                        viewOffsetX = 0f
-                                        viewOffsetY = 0f
-                                    }
-                                    event.changes.forEach { it.consume() }
-                                } else if (!multiTouch) {
-                                    val d = event.changes.firstOrNull()?.positionChange()
-                                    if (d != null && (abs(d.x) > 4f || abs(d.y) > 4f)) moved = true
-                                }
-                            }
-                            if (!multiTouch && !moved) {
-                                if (player.isPlaying) {
-                                    player.pause()
-                                    playing = false
+    // --- Reusable pieces. Landscape needs a different arrangement (video beside the controls,
+    // not above them — see the layout picker at the bottom of this function), so everything past
+    // the video is split into small local composables shared by both arrangements rather than
+    // duplicated. They close over the state above like any other part of this composable.
+
+    @Composable
+    fun VideoArea(modifier: Modifier) {
+        BoxWithConstraints(
+            modifier
+                .clipToBounds()
+                // Two fingers pan/zoom the frame; a single tap toggles playback. Splitting on
+                // pointer count keeps the two from stealing each other's gestures — same
+                // approach as the live screen's pinch-vs-swipe.
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        var multiTouch = false
+                        var moved = false
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.count { it.pressed }
+                            if (pressed == 0) break
+                            if (pressed >= 2) {
+                                multiTouch = true
+                                val zoomChange = event.calculateZoom()
+                                val panChange = event.calculatePan()
+                                viewScale = (viewScale * zoomChange).coerceIn(1f, 6f)
+                                if (viewScale > 1f) {
+                                    viewOffsetX += panChange.x
+                                    viewOffsetY += panChange.y
                                 } else {
-                                    player.play()
-                                    playing = true
+                                    viewOffsetX = 0f
+                                    viewOffsetY = 0f
                                 }
+                                event.changes.forEach { it.consume() }
+                            } else if (!multiTouch) {
+                                val d = event.changes.firstOrNull()?.positionChange()
+                                if (d != null && (abs(d.x) > 4f || abs(d.y) > 4f)) moved = true
                             }
                         }
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                // Fit the video inside the box at its real aspect ratio (letterbox), not stretched.
-                val bw = constraints.maxWidth.toFloat()
-                val bh = constraints.maxHeight.toFloat()
-                val fitByHeight = bw / bh > videoAspect
-                val vwPx = if (fitByHeight) bh * videoAspect else bw
-                val vhPx = if (fitByHeight) bh else bw / videoAspect
-                AndroidView(
-                    modifier = Modifier
-                        .width(with(density) { vwPx.toDp() })
-                        .height(with(density) { vhPx.toDp() })
-                        .graphicsLayer {
-                            scaleX = viewScale
-                            scaleY = viewScale
-                            translationX = viewOffsetX
-                            translationY = viewOffsetY
-                        },
-                    factory = { ctx ->
-                        SurfaceView(ctx).also { sv -> player.exoPlayer.setVideoSurfaceView(sv) }
-                    },
-                )
-            }
-
-            // Fixed-height track so the marker overlays can't stretch the layout.
-            BoxWithConstraints(
-                Modifier
-                    .fillMaxWidth()
-                    .height(48.dp),
-            ) {
-                val usable = maxWidth - 2.dp
-                Slider(
-                    modifier = Modifier.align(Alignment.Center),
-                    value = scrub,
-                    onValueChange = {
-                        dragging = true
-                        if (player.isPlaying) player.pause()
-                        playing = false
-                        scrub = it
-                        player.seekToTimeline((totalMs * it).toLong())
-                    },
-                    onValueChangeFinished = {
-                        dragging = false
-                        player.play()
-                        playing = true
-                    },
-                )
-                startFraction?.let {
-                    Box(
-                        Modifier
-                            .offset(x = usable * it)
-                            .width(2.dp)
-                            .fillMaxHeight()
-                            .background(Color(0xFF4CAF50)),
-                    )
-                }
-                endFraction?.let {
-                    Box(
-                        Modifier
-                            .offset(x = usable * it)
-                            .width(2.dp)
-                            .fillMaxHeight()
-                            .background(Color(0xFFF44336)),
-                    )
-                }
-            }
-
-            val posSec = (totalMs * scrub / 1000).toInt()
-            val totalSec = (totalMs / 1000).toInt()
-            Text(
-                buildString {
-                    append("${posSec}초 / ${totalSec}초  ·  ${fps}fps")
-                    startFraction?.let { append("   ·   시작 ${(totalMs * it / 1000).toInt()}초") }
-                    endFraction?.let { append("   ·   끝 ${(totalMs * it / 1000).toInt()}초") }
-                },
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            // playback speed + single-frame step
-            FlowRow(
-                Modifier.fillMaxWidth().padding(top = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                listOf(1f to "1배", 0.5f to "0.5배", 0.25f to "0.25배").forEach { (sp, label) ->
-                    ChoiceChip(label, sp == speed) { speed = sp; player.setSpeed(sp) }
-                }
-                ChoiceChip("◀ 프레임", false) { stepFrame(-1) }
-                ChoiceChip("프레임 ▶", false) { stepFrame(1) }
-
-                if (startFraction != null && endFraction != null) {
-                    ChoiceChip(if (loopAb) "↻ A–B 반복 켜짐" else "↻ A–B 반복", loopAb) {
-                        if (loopAb) {
-                            loopAb = false
-                        } else {
-                            loopAb = true
-                            val a = startFraction
-                            val b = endFraction
-                            if (a != null && b != null) {
-                                seekTimeline((totalMs * minOf(a, b)).toLong())
-                                player.setSpeed(speed)
+                        if (!multiTouch && !moved) {
+                            if (player.isPlaying) {
+                                player.pause()
+                                playing = false
+                            } else {
                                 player.play()
                                 playing = true
                             }
                         }
                     }
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            // Fit the video inside the box at its real aspect ratio (letterbox), not stretched.
+            val bw = constraints.maxWidth.toFloat()
+            val bh = constraints.maxHeight.toFloat()
+            val fitByHeight = bw / bh > videoAspect
+            val vwPx = if (fitByHeight) bh * videoAspect else bw
+            val vhPx = if (fitByHeight) bh else bw / videoAspect
+            AndroidView(
+                modifier = Modifier
+                    .width(with(density) { vwPx.toDp() })
+                    .height(with(density) { vhPx.toDp() })
+                    .graphicsLayer {
+                        scaleX = viewScale
+                        scaleY = viewScale
+                        translationX = viewOffsetX
+                        translationY = viewOffsetY
+                    },
+                factory = { ctx ->
+                    SurfaceView(ctx).also { sv -> player.exoPlayer.setVideoSurfaceView(sv) }
+                },
+            )
+        }
+    }
+
+    @Composable
+    fun Track(modifier: Modifier) {
+            // Fixed-height track so the marker overlays can't stretch the layout. One finger
+            // scrubs (mapped through the current zoom window); two fingers pinch to zoom in on
+            // the track or pan the zoomed window — same split-on-pointer-count approach as the
+            // video gesture above, so it never steals the scrub gesture out from under it.
+            BoxWithConstraints(
+                modifier
+                    .height(48.dp)
+                    .pointerInput(totalMs) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            var multiTouch = false
+                            val widthPx = size.width.toFloat()
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val pressed = event.changes.count { it.pressed }
+                                if (pressed == 0) break
+                                if (pressed >= 2) {
+                                    if (dragging) { // hand off from a single-finger scrub mid-gesture
+                                        dragging = false
+                                        player.play()
+                                        playing = true
+                                    }
+                                    multiTouch = true
+                                    if (widthPx > 0f) {
+                                        val centroidX = event.changes.fold(0f) { s, c -> s + c.position.x } / pressed
+                                        val anchorView = (centroidX / widthPx).coerceIn(0f, 1f)
+                                        val zoomChange = event.calculateZoom()
+                                        if (zoomChange != 1f) tz = tz.zoomedBy(zoomChange, anchorView)
+                                        val panChange = event.calculatePan()
+                                        if (panChange.x != 0f) tz = tz.pannedBy(panChange.x / widthPx)
+                                    }
+                                    event.changes.forEach { it.consume() }
+                                } else if (!multiTouch && widthPx > 0f) {
+                                    if (!dragging) {
+                                        dragging = true
+                                        if (player.isPlaying) player.pause()
+                                        playing = false
+                                    }
+                                    val x = event.changes.first().position.x.coerceIn(0f, widthPx)
+                                    scrub = tz.toBuffer(x / widthPx)
+                                    player.seekToTimeline((totalMs * scrub).toLong())
+                                    event.changes.forEach { it.consume() }
+                                }
+                            }
+                            if (dragging) {
+                                dragging = false
+                                player.play()
+                                playing = true
+                            }
+                        }
+                    },
+            ) {
+                val usable = maxWidth - 2.dp
+                Box(
+                    Modifier
+                        .align(Alignment.Center)
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .background(MaterialTheme.colorScheme.outline, RoundedCornerShape(2.dp)),
+                )
+                if (tz.isVisible(scrub)) {
+                    Box(
+                        Modifier
+                            .align(Alignment.CenterStart)
+                            .offset(x = usable * tz.toView(scrub) - 8.dp)
+                            .size(16.dp)
+                            .background(MaterialTheme.colorScheme.primary, CircleShape),
+                    )
                 }
-                if (viewScale > 1f) {
-                    ChoiceChip("줌 초기화 ${"%.1f".format(viewScale)}×", false) {
-                        viewScale = 1f; viewOffsetX = 0f; viewOffsetY = 0f
+                startFraction?.let {
+                    if (tz.isVisible(it)) {
+                        Box(
+                            Modifier
+                                .offset(x = usable * tz.toView(it))
+                                .width(2.dp)
+                                .fillMaxHeight()
+                                .background(Color(0xFF4CAF50)),
+                        )
+                    }
+                }
+                endFraction?.let {
+                    if (tz.isVisible(it)) {
+                        Box(
+                            Modifier
+                                .offset(x = usable * tz.toView(it))
+                                .width(2.dp)
+                                .fillMaxHeight()
+                                .background(Color(0xFFF44336)),
+                        )
                     }
                 }
             }
+    }
 
-            Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    modifier = Modifier.weight(1f),
-                    onClick = {
-                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        startFraction = scrub
-                    },
-                ) { Text("시작점") }
-                OutlinedButton(
-                    modifier = Modifier.weight(1f),
-                    onClick = {
-                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        endFraction = scrub
-                    },
-                ) { Text("끝점") }
+    // Mini-map of the full buffer with the zoomed-in window highlighted, so it's obvious there's
+    // more footage off-screen to either side. Only worth the space once zoomed.
+    @Composable
+    fun Minimap(modifier: Modifier) {
+        if (tz.zoom > 1f) {
+            BoxWithConstraints(modifier.height(6.dp)) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(3.dp)),
+                )
+                Box(
+                    Modifier
+                        .offset(x = maxWidth * tz.start)
+                        .width(maxWidth * tz.span)
+                        .fillMaxHeight()
+                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(3.dp)),
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun InfoText(modifier: Modifier) {
+        val posSec = (totalMs * scrub / 1000).toInt()
+        val totalSec = (totalMs / 1000).toInt()
+        Text(
+            buildString {
+                append("${posSec}초 / ${totalSec}초  ·  ${fps}fps")
+                startFraction?.let { append("   ·   시작 ${(totalMs * it / 1000).toInt()}초") }
+                endFraction?.let { append("   ·   끝 ${(totalMs * it / 1000).toInt()}초") }
+            },
+            modifier = modifier,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
+    // playback speed + single-frame step + toggles
+    @Composable
+    fun ChipsRow(modifier: Modifier) {
+        FlowRow(
+            modifier,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            listOf(1f to "1배", 0.5f to "0.5배", 0.25f to "0.25배").forEach { (sp, label) ->
+                ChoiceChip(label, sp == speed) { speed = sp; player.setSpeed(sp) }
+            }
+            ChoiceChip("◀ 프레임", false) { stepFrame(-1) }
+            ChoiceChip("프레임 ▶", false) { stepFrame(1) }
+
+            if (startFraction != null && endFraction != null) {
+                ChoiceChip(if (loopAb) "↻ A–B 반복 켜짐" else "↻ A–B 반복", loopAb) {
+                    if (loopAb) {
+                        loopAb = false
+                    } else {
+                        loopAb = true
+                        val a = startFraction
+                        val b = endFraction
+                        if (a != null && b != null) {
+                            seekTimeline((totalMs * minOf(a, b)).toLong())
+                            player.setSpeed(speed)
+                            player.play()
+                            playing = true
+                        }
+                    }
+                }
+            }
+            if (viewScale > 1f) {
+                ChoiceChip("줌 초기화 ${"%.1f".format(viewScale)}×", false) {
+                    viewScale = 1f; viewOffsetX = 0f; viewOffsetY = 0f
+                }
+            }
+            if (tz.zoom > 1f) {
+                ChoiceChip("시간축 ${"%.1f".format(tz.zoom)}× 축소", false) { tz = tz.reset() }
+            }
+        }
+    }
+
+    @Composable
+    fun MarkerButtons(modifier: Modifier) {
+        Row(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    startFraction = scrub
+                },
+            ) { Text("시작점") }
+            OutlinedButton(
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    endFraction = scrub
+                },
+            ) { Text("끝점") }
+        }
+    }
+
+    @Composable
+    fun SaveButton(modifier: Modifier) {
+        Button(
+            modifier = modifier,
+            enabled = startFraction != null && endFraction != null,
+            onClick = {
+                val a = startFraction ?: return@Button
+                val b = endFraction ?: return@Button
+                // Convert through the timeline so the cut lands on the real wall-clock instant
+                // of that frame, not on "start + cumulative duration".
+                val startMs = player.wallClockAtFraction(minOf(a, b))
+                val endMs = player.wallClockAtFraction(maxOf(a, b))
+                // Release this screen's own ExoPlayer *before* kicking off the export, not after
+                // (onBackToLive's navigation would otherwise trigger it via onDispose a beat
+                // later). Transformer builds its own ExoPlayer-based asset loader per segment and
+                // switches between them — leaving this player's decoder mid-teardown at the same
+                // moment likely contended for the same hardware decoder slot, which lines up with
+                // the "Player release timed out" failures seen in the field even after a retry.
+                runCatching { player.release() }
+                service.exportManual(startMs, endMs, speed)
+                onBackToLive()
+            },
+        ) { Text(if (speed == 1f) "구간 저장" else "구간 저장 (${speed}배속 슬로모)") }
+    }
+
+    @Composable
+    fun LiveButton(modifier: Modifier) {
+        Button(modifier = modifier, onClick = onBackToLive) { Text("라이브로") }
+    }
+
+    RotatedEdge(orientation, Alignment.Center) {
+        when {
+            totalMs <= 0L -> Column(Modifier.fillMaxSize().padding(12.dp)) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text("아직 녹화된 영상이 없어요 — 잠시 녹화되게 두고 다시 오세요.")
+                }
+                Button(modifier = Modifier.fillMaxWidth(), onClick = onBackToLive) { Text("라이브로 돌아가기") }
             }
 
-            Button(
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                enabled = startFraction != null && endFraction != null,
-                onClick = {
-                    val a = startFraction ?: return@Button
-                    val b = endFraction ?: return@Button
-                    // Convert through the timeline so the cut lands on the real wall-clock
-                    // instant of that frame, not on "start + cumulative duration".
-                    service.exportManual(
-                        player.wallClockAtFraction(minOf(a, b)),
-                        player.wallClockAtFraction(maxOf(a, b)),
-                        speed,
-                    )
-                    onBackToLive()
-                },
-            ) { Text(if (speed == 1f) "구간 저장" else "구간 저장 (${speed}배속 슬로모)") }
+            // Landscape: the physical screen is only as tall as its (portrait) width, so stacking
+            // everything vertically the way portrait does would squeeze the video down to a
+            // sliver under all the fixed-height controls. Put the video beside a narrow,
+            // independently-scrolling control rail instead — the video gets the full height, and
+            // there's plenty of width to spare for the rail.
+            orientation.isLandscape -> Row(Modifier.fillMaxSize().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                VideoArea(Modifier.weight(1f).fillMaxHeight())
+                Column(
+                    Modifier
+                        .width(260.dp)
+                        .fillMaxHeight()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Track(Modifier.fillMaxWidth())
+                    Minimap(Modifier.fillMaxWidth())
+                    InfoText(Modifier)
+                    ChipsRow(Modifier.fillMaxWidth())
+                    MarkerButtons(Modifier.fillMaxWidth())
+                    SaveButton(Modifier.fillMaxWidth())
+                    LiveButton(Modifier.fillMaxWidth())
+                }
+            }
 
-            Button(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), onClick = onBackToLive) {
-                Text("라이브로")
+            else -> Column(Modifier.fillMaxSize().padding(12.dp)) {
+                VideoArea(Modifier.fillMaxWidth().weight(1f))
+                Track(Modifier.fillMaxWidth())
+                Minimap(Modifier.fillMaxWidth().padding(top = 3.dp))
+                InfoText(Modifier)
+                ChipsRow(Modifier.fillMaxWidth().padding(top = 8.dp))
+                MarkerButtons(Modifier.fillMaxWidth().padding(top = 8.dp))
+                SaveButton(Modifier.fillMaxWidth().padding(top = 8.dp))
+                LiveButton(Modifier.fillMaxWidth().padding(top = 8.dp))
             }
         }
     }

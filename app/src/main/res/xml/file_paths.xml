@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- `path` names a *directory* under filesDir, not a file — pointing it at the log file's own
+     name (instead of "." for the filesDir root) made FileProvider's internal prefix match run
+     off the end of the string (StringIndexOutOfBoundsException in getUriForFile). The log lives
+     directly in filesDir, so exposing the whole root is what actually matches it. -->
+<paths>
+    <files-path name="logs" path="." />
+</paths>

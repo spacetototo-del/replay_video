@@ -16,7 +16,9 @@ import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
 import com.diving.replay.Constants
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -61,21 +63,72 @@ class ClipExporter(
      */
     suspend fun export(startMs: Long, endMs: Long, speed: Float = 1f): Result {
         val partial = rotation.isStartTruncated(startMs)
-        val plan = ClipCutPlanner.plan(rotation.snapshot(), startMs, endMs)
-            ?: return Result.NothingToSave
-
-        buildAndRun(plan, partial, speed)?.let { return it }
-        // slow export failed — fall back to normal speed
-        return if (speed != 1f) {
-            Log.w(TAG, "slow export ($speed x) failed, retrying at 1x")
-            buildAndRun(plan, partial, 1f) ?: Result.Failed("transform error")
-        } else {
-            Result.Failed("transform error")
+        val snapshot = rotation.snapshot()
+        val plan = ClipCutPlanner.plan(snapshot, startMs, endMs)
+        if (plan == null) {
+            DiagnosticLog.logFailure(
+                context, "nothing to save",
+                mapOf(
+                    "requestedStartMs" to startMs,
+                    "requestedEndMs" to endMs,
+                    "requestedSpanMs" to (endMs - startMs),
+                    "bufferSegments" to snapshot.size,
+                    "bufferSpanMs" to snapshot.takeIf { it.isNotEmpty() }
+                        ?.let { it.last().endedAtMs - it.first().startedAtMs },
+                ),
+            )
+            return Result.NothingToSave
         }
+
+        // Transformer occasionally throws ExoTimeoutException("Player release timed out") when a
+        // multi-segment composition switches between per-segment asset loaders — real failures
+        // seen in the field (3-4 segments, plenty of heap free, so not an OOM) that kept
+        // recurring even one retry later. A longer gap between attempts gives whatever hardware
+        // decoder slot it's contending for more of a chance to actually free up.
+        var lastError: Throwable? = null
+        repeat(EXPORT_ATTEMPTS) { attempt ->
+            val (saved, error) = buildAndRun(plan, partial, speed)
+            if (saved != null) return saved
+            lastError = error
+            if (attempt < EXPORT_ATTEMPTS - 1) {
+                Log.w(TAG, "export attempt ${attempt + 1}/$EXPORT_ATTEMPTS failed, retrying", error)
+                delay(800)
+            }
+        }
+        // slow export failed — fall back to normal speed
+        if (speed != 1f) {
+            Log.w(TAG, "slow export ($speed x) failed after retries, falling back to 1x")
+            val (saved, error) = buildAndRun(plan, partial, 1f)
+            if (saved != null) return saved
+            lastError = error
+        }
+        logExportFailure(plan, speed, lastError)
+        return Result.Failed("transform error")
     }
 
-    /** Returns null on transform failure so the caller can retry / fall back. */
-    private suspend fun buildAndRun(plan: ClipPlan, partial: Boolean, speed: Float): Result? {
+    private fun logExportFailure(plan: ClipPlan, speed: Float, error: Throwable?) {
+        val rt = Runtime.getRuntime()
+        DiagnosticLog.logFailure(
+            context, "export failed",
+            mapOf(
+                "requestedSpeed" to speed,
+                "effectiveStartMs" to plan.effectiveStartMs,
+                "effectiveEndMs" to plan.effectiveEndMs,
+                "requestedSpanMs" to (plan.effectiveEndMs - plan.effectiveStartMs),
+                "keptDurationMs" to plan.keptDurationMs,
+                "segmentCount" to plan.cuts.size,
+                "device" to "${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE}",
+                "heapUsedMB" to (rt.totalMemory() - rt.freeMemory()) / 1_000_000,
+                "heapMaxMB" to rt.maxMemory() / 1_000_000,
+                "freeDiskMB" to runCatching { context.filesDir.usableSpace / 1_000_000 }.getOrNull(),
+            ),
+            error = error,
+        )
+    }
+
+    /** Null [Result.Saved] paired with the causing error on transform failure, so the caller can
+     *  retry / fall back / log without redoing the try-catch. */
+    private suspend fun buildAndRun(plan: ClipPlan, partial: Boolean, speed: Float): Pair<Result.Saved?, Throwable?> {
         val editedItems = plan.cuts.map { cut ->
             val mediaBuilder = MediaItem.Builder().setUri(cut.segment.file.toURI().toString())
             if (cut.startInSegmentMs > 0 || cut.endInSegmentMs != ClipCut.KEEP_TO_END) {
@@ -112,11 +165,17 @@ class ClipExporter(
                 publishToGallery(cacheOut, plan.effectiveStartMs)
             }
             cacheOut.delete()
-            Result.Saved(uri, name, savedDurationMs, partial, speed)
-        } catch (e: Exception) {
+            Result.Saved(uri, name, savedDurationMs, partial, speed) to null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // Throwable, not Exception: a 30-minute buffer is ~120 segments for Transformer to
+            // decode+re-encode in one pass, and that's exactly the shape of thing that can throw
+            // OutOfMemoryError rather than a plain Exception. Catching it here turns a silent
+            // service crash into a clean Failed result plus a diagnostic entry.
             Log.e(TAG, "export failed (speed=$speed)", e)
             cacheOut.delete()
-            null
+            null to e
         }
     }
 
@@ -167,5 +226,8 @@ class ClipExporter(
 
     companion object {
         private const val TAG = "ClipExporter"
+
+        /** Attempts at the requested speed before falling back to 1x (if slow) / giving up. */
+        private const val EXPORT_ATTEMPTS = 3
     }
 }

@@ -1,5 +1,8 @@
 package com.diving.replay.ui
 
+import android.content.Context
+import android.content.Intent
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -17,6 +20,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -32,7 +36,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import com.diving.replay.Constants
+import com.diving.replay.camera.DiagnosticLog
 import com.diving.replay.data.CAPTURE_FPS_OPTIONS
 import com.diving.replay.data.CaptureSettingsRepository
 import com.diving.replay.data.DIM_AFTER_OPTIONS_SEC
@@ -159,6 +165,22 @@ fun SettingsScreen(onBack: () -> Unit, onExitApp: () -> Unit = {}) {
             }
 
             SettingCard {
+                SectionLabel("진단 로그")
+                Hint("구간 저장이 실패하면 자동으로 기록됩니다. PC 없이도 이 버튼으로 공유해서 나중에 원인을 확인할 수 있어요.")
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(modifier = Modifier.weight(1f), onClick = { shareDiagnosticLog(context) }) {
+                        Text("로그 공유")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            DiagnosticLog.file(context).delete()
+                            Toast.makeText(context, "로그를 지웠어요", Toast.LENGTH_SHORT).show()
+                        },
+                    ) { Text("지우기") }
+                }
+            }
+
+            SettingCard {
                 SectionLabel("앱 종료")
                 Hint("버퍼 녹화를 멈추고 카메라를 놓은 뒤 앱을 완전히 닫습니다. 그냥 홈으로 나가거나 최근 앱에서 밀어내도 이제 종료되지만, 확실히 끄려면 이 버튼을 쓰세요.")
                 Button(
@@ -239,4 +261,21 @@ private fun IdleScreenMode.koLabel(): String = when (this) {
     IdleScreenMode.ALWAYS_BRIGHT -> "항상 밝게"
     IdleScreenMode.DIM -> "대기 시 어둡게"
     IdleScreenMode.SCREEN_OFF -> "대기 시 화면 끄기"
+}
+
+/** Hands DiagnosticLog's file to the OS share sheet via FileProvider — no PC needed. */
+private fun shareDiagnosticLog(context: Context) {
+    val file = DiagnosticLog.file(context)
+    if (!file.exists() || file.length() == 0L) {
+        Toast.makeText(context, "저장된 진단 로그가 없어요", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, "DivingReplay 진단 로그")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "진단 로그 공유"))
 }

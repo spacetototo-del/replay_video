@@ -251,7 +251,7 @@ fun LivePreviewScreen(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                BarAction(Icons.Rounded.ContentCut, "되감기", onEnterRewind, Modifier.weight(1f))
+                BarAction(Icons.Rounded.ContentCut, "되감기·편집", onEnterRewind, Modifier.weight(1f))
                 BarAction(Icons.Rounded.HistoryToggleOff, "지연재생", onEnterDelayed, Modifier.weight(1f))
                 BarAction(Icons.Rounded.VideoLibrary, "저장영상", onOpenClips, Modifier.weight(1f))
                 BarAction(Icons.Rounded.Settings, "설정", onOpenSettings, Modifier.weight(1f))
