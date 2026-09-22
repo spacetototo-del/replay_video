@@ -3,13 +3,14 @@ package com.diving.replay.ui
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateZoom
@@ -78,6 +79,39 @@ fun LivePreviewScreen(
     // Activity is portrait-locked; the overlay controls dock to the physical bottom/top edge and
     // turn to follow the phone. Purely visual — the camera and the recorded file are unaffected.
     val orientation = rememberUprightOrientation()
+
+    @Composable
+    fun RecordStopButton(armed: Boolean, compact: Boolean, modifier: Modifier = Modifier) {
+        if (!armed) {
+            Button(
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    service.onMarkStart()
+                },
+                modifier = modifier.height(if (compact) 44.dp else 52.dp),
+                shape = RoundedCornerShape(DivingTokens.chipRadius),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = DivingTokens.recRed,
+                    contentColor = androidx.compose.ui.graphics.Color.White,
+                ),
+            ) {
+                Icon(Icons.Rounded.FiberManualRecord, contentDescription = null)
+                Text(if (compact) " REC" else "  녹화 시작", fontWeight = FontWeight.SemiBold, fontSize = if (compact) 14.sp else 16.sp)
+            }
+        } else {
+            Button(
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    service.onMarkEnd()
+                },
+                modifier = modifier.height(if (compact) 44.dp else 52.dp),
+                shape = RoundedCornerShape(DivingTokens.chipRadius),
+            ) {
+                Icon(Icons.Rounded.Stop, contentDescription = null)
+                Text(if (compact) " 정지" else "  정지", fontWeight = FontWeight.SemiBold, fontSize = if (compact) 14.sp else 16.sp)
+            }
+        }
+    }
 
     Box(
         Modifier
@@ -208,53 +242,47 @@ fun LivePreviewScreen(
 
         // bottom: record button + an evenly-shared action bar. RotatedEdge docks it to the
         // physical bottom edge and turns it with the phone, so it slides round to the new
-        // bottom in landscape rather than staying stuck along the portrait edge. Width-capped
-        // and centred so it never stretches on a tablet.
+        // bottom in landscape rather than staying stuck along the portrait edge.
         RotatedEdge(orientation, Alignment.BottomCenter) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                // Kept fairly tight so that when it turns sideways the strip doesn't run the
-                // whole length of the screen edge.
-                .widthIn(max = 440.dp)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            if (armedFrom == null) {
-                Button(
-                    onClick = {
-                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                        service.onMarkStart()
-                    },
-                    modifier = Modifier.fillMaxWidth().height(52.dp),
-                    shape = RoundedCornerShape(DivingTokens.chipRadius),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = DivingTokens.recRed,
-                        contentColor = androidx.compose.ui.graphics.Color.White,
-                    ),
+        BoxWithConstraints {
+            // Cap explicitly against the measured width here, rather than trusting
+            // fillMaxWidth().widthIn(max=...) to shrink on its own — that combination silently
+            // failed to cap inside RotatedEdge's rotated frame (measured ~660dp wide on a real
+            // device instead of the intended 440dp cap), which is what let this bar balloon.
+            val barWidth = minOf(maxWidth, 440.dp)
+            if (orientation.isLandscape) {
+                // This dock's cross-axis budget in landscape is the phone's own portrait
+                // *width* (~360dp on a normal phone vs ~670dp on an unfolded Fold) — the
+                // two-row portrait layout below is a small slice of that on a Fold but nearly
+                // half of it on a regular phone. One compact icon row instead.
+                Row(
+                    Modifier
+                        .width(barWidth)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(Icons.Rounded.FiberManualRecord, contentDescription = null)
-                    Text("  녹화 시작", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                    RecordStopButton(armed = armedFrom != null, compact = true, modifier = Modifier.weight(1.6f))
+                    BarAction(Icons.Rounded.ContentCut, "되감기·편집", onEnterRewind, Modifier.weight(1f), compact = true)
+                    BarAction(Icons.Rounded.HistoryToggleOff, "지연재생", onEnterDelayed, Modifier.weight(1f), compact = true)
+                    BarAction(Icons.Rounded.VideoLibrary, "저장영상", onOpenClips, Modifier.weight(1f), compact = true)
+                    BarAction(Icons.Rounded.Settings, "설정", onOpenSettings, Modifier.weight(1f), compact = true)
                 }
             } else {
-                Button(
-                    onClick = {
-                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                        service.onMarkEnd()
-                    },
-                    modifier = Modifier.fillMaxWidth().height(52.dp),
-                    shape = RoundedCornerShape(DivingTokens.chipRadius),
+                Column(
+                    Modifier
+                        .width(barWidth)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Icon(Icons.Rounded.Stop, contentDescription = null)
-                    Text("  정지", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                    RecordStopButton(armed = armedFrom != null, compact = false, modifier = Modifier.fillMaxWidth())
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        BarAction(Icons.Rounded.ContentCut, "되감기·편집", onEnterRewind, Modifier.weight(1f))
+                        BarAction(Icons.Rounded.HistoryToggleOff, "지연재생", onEnterDelayed, Modifier.weight(1f))
+                        BarAction(Icons.Rounded.VideoLibrary, "저장영상", onOpenClips, Modifier.weight(1f))
+                        BarAction(Icons.Rounded.Settings, "설정", onOpenSettings, Modifier.weight(1f))
+                    }
                 }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                BarAction(Icons.Rounded.ContentCut, "되감기·편집", onEnterRewind, Modifier.weight(1f))
-                BarAction(Icons.Rounded.HistoryToggleOff, "지연재생", onEnterDelayed, Modifier.weight(1f))
-                BarAction(Icons.Rounded.VideoLibrary, "저장영상", onOpenClips, Modifier.weight(1f))
-                BarAction(Icons.Rounded.Settings, "설정", onOpenSettings, Modifier.weight(1f))
             }
         }
         }

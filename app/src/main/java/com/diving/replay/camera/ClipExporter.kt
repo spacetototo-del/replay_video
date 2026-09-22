@@ -82,17 +82,21 @@ class ClipExporter(
 
         // Transformer occasionally throws ExoTimeoutException("Player release timed out") when a
         // multi-segment composition switches between per-segment asset loaders — real failures
-        // seen in the field (3-4 segments, plenty of heap free, so not an OOM) that kept
-        // recurring even one retry later. A longer gap between attempts gives whatever hardware
-        // decoder slot it's contending for more of a chance to actually free up.
+        // seen in the field that kept recurring even after a retry. The underlying cause: an
+        // ExoPlayer's internal release() has a hardcoded 500ms timeout, and Transformer hits that
+        // release once per segment hand-off — so a long save (more segments = more hand-offs) has
+        // more chances to lose that race under hardware decoder contention than a short one.
+        // Longer, escalating gaps between attempts (mirrors the camera rebind backoff in
+        // RecordingService) give the contended decoder slot progressively more room to clear.
         var lastError: Throwable? = null
         repeat(EXPORT_ATTEMPTS) { attempt ->
             val (saved, error) = buildAndRun(plan, partial, speed)
             if (saved != null) return saved
             lastError = error
             if (attempt < EXPORT_ATTEMPTS - 1) {
-                Log.w(TAG, "export attempt ${attempt + 1}/$EXPORT_ATTEMPTS failed, retrying", error)
-                delay(800)
+                val backoffMs = 800L + attempt * 600L
+                Log.w(TAG, "export attempt ${attempt + 1}/$EXPORT_ATTEMPTS failed, retrying in ${backoffMs}ms", error)
+                delay(backoffMs)
             }
         }
         // slow export failed — fall back to normal speed
@@ -228,6 +232,6 @@ class ClipExporter(
         private const val TAG = "ClipExporter"
 
         /** Attempts at the requested speed before falling back to 1x (if slow) / giving up. */
-        private const val EXPORT_ATTEMPTS = 3
+        private const val EXPORT_ATTEMPTS = 6
     }
 }

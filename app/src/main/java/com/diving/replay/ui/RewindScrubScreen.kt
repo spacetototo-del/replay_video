@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,6 +28,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -121,6 +123,32 @@ fun RewindScrubScreen(
         seekTimeline(player.currentTimelineMs() + dir * frameMs)
     }
 
+    // Marking the start shouldn't freeze anything — the whole point is to then watch the
+    // playhead keep moving right while looking for the end. If playback wasn't already running
+    // (e.g. marked right after a paused frame-step), kick it off so there's something to watch.
+    fun markStart(): Float {
+        val frac = player.timelineFraction()
+        scrub = frac
+        if (!player.isPlaying) {
+            player.setSpeed(speed)
+            player.play()
+            playing = true
+        }
+        return frac
+    }
+
+    // Marking the end is the opposite: pause immediately and read the position straight from the
+    // player (not the ~100ms-stale `scrub` state the playback loop below updates), so the freeze
+    // frame gives visible confirmation of exactly what got captured — instead of the video
+    // sailing on past the spot while the mark silently landed a beat earlier.
+    fun markEnd(): Float {
+        if (player.isPlaying) player.pause()
+        playing = false
+        val frac = player.timelineFraction()
+        scrub = frac
+        return frac
+    }
+
     DisposableEffect(Unit) {
         // Freeze pruning while this screen is open, so the range the user picks is still on disk
         // when they hit save.
@@ -167,7 +195,15 @@ fun RewindScrubScreen(
                     scrub = frac
                 } else {
                     scrub = player.timelineFraction()
-                    if (player.atEnd() || !player.isPlaying) {
+                    // Only a real end-of-timeline stops the follow loop. `!player.isPlaying`
+                    // used to stop it too, but ExoPlayer briefly reports isPlaying=false while
+                    // it's still buffering right after a fresh play() (exactly what markStart()
+                    // triggers) — that transient false tripped this and silently killed the loop
+                    // a beat after playback actually started, leaving the playhead marker
+                    // stranded at the old position while the video kept going. Explicit pauses
+                    // (tap-to-pause, markEnd) already flip `playing` at their own call site, so
+                    // they don't need this check to stop the loop.
+                    if (player.atEnd()) {
                         playing = false
                         break
                     }
@@ -376,13 +412,15 @@ fun RewindScrubScreen(
 
     @Composable
     fun InfoText(modifier: Modifier) {
-        val posSec = (totalMs * scrub / 1000).toInt()
-        val totalSec = (totalMs / 1000).toInt()
+        // Tenths of a second, not whole seconds — at 30fps a whole-second readout can't tell two
+        // marks apart that are a dozen frames off, which is exactly the precision editing here needs.
+        fun fmt(ms: Long) = "%.1f".format(ms / 1000f)
+        val posMs = (totalMs * scrub).toLong()
         Text(
             buildString {
-                append("${posSec}초 / ${totalSec}초  ·  ${fps}fps")
-                startFraction?.let { append("   ·   시작 ${(totalMs * it / 1000).toInt()}초") }
-                endFraction?.let { append("   ·   끝 ${(totalMs * it / 1000).toInt()}초") }
+                append("${fmt(posMs)}초 / ${fmt(totalMs)}초  ·  ${fps}fps")
+                startFraction?.let { append("   ·   시작 ${fmt((totalMs * it).toLong())}초") }
+                endFraction?.let { append("   ·   끝 ${fmt((totalMs * it).toLong())}초") }
             },
             modifier = modifier,
             fontSize = 12.sp,
@@ -392,20 +430,20 @@ fun RewindScrubScreen(
 
     // playback speed + single-frame step + toggles
     @Composable
-    fun ChipsRow(modifier: Modifier) {
+    fun ChipsRow(modifier: Modifier, compact: Boolean = false) {
         FlowRow(
             modifier,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 6.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 6.dp),
         ) {
             listOf(1f to "1배", 0.5f to "0.5배", 0.25f to "0.25배").forEach { (sp, label) ->
-                ChoiceChip(label, sp == speed) { speed = sp; player.setSpeed(sp) }
+                ChoiceChip(label, sp == speed, compact) { speed = sp; player.setSpeed(sp) }
             }
-            ChoiceChip("◀ 프레임", false) { stepFrame(-1) }
-            ChoiceChip("프레임 ▶", false) { stepFrame(1) }
+            ChoiceChip("◀ 프레임", false, compact) { stepFrame(-1) }
+            ChoiceChip("프레임 ▶", false, compact) { stepFrame(1) }
 
             if (startFraction != null && endFraction != null) {
-                ChoiceChip(if (loopAb) "↻ A–B 반복 켜짐" else "↻ A–B 반복", loopAb) {
+                ChoiceChip(if (loopAb) "↻ A–B 반복 켜짐" else "↻ A–B 반복", loopAb, compact) {
                     if (loopAb) {
                         loopAb = false
                     } else {
@@ -422,40 +460,43 @@ fun RewindScrubScreen(
                 }
             }
             if (viewScale > 1f) {
-                ChoiceChip("줌 초기화 ${"%.1f".format(viewScale)}×", false) {
+                ChoiceChip("줌 초기화 ${"%.1f".format(viewScale)}×", false, compact) {
                     viewScale = 1f; viewOffsetX = 0f; viewOffsetY = 0f
                 }
             }
             if (tz.zoom > 1f) {
-                ChoiceChip("시간축 ${"%.1f".format(tz.zoom)}× 축소", false) { tz = tz.reset() }
+                ChoiceChip("시간축 ${"%.1f".format(tz.zoom)}× 축소", false, compact) { tz = tz.reset() }
             }
         }
     }
 
     @Composable
-    fun MarkerButtons(modifier: Modifier) {
-        Row(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    fun MarkerButtons(modifier: Modifier, compact: Boolean = false) {
+        Row(modifier, horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp)) {
             OutlinedButton(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).height(if (compact) 34.dp else ButtonDefaults.MinHeight),
+                contentPadding = if (compact) PaddingValues(horizontal = 6.dp) else ButtonDefaults.ContentPadding,
                 onClick = {
                     haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    startFraction = scrub
+                    startFraction = markStart()
                 },
-            ) { Text("시작점") }
+            ) { Text("시작점", fontSize = if (compact) 12.sp else 14.sp) }
             OutlinedButton(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).height(if (compact) 34.dp else ButtonDefaults.MinHeight),
+                contentPadding = if (compact) PaddingValues(horizontal = 6.dp) else ButtonDefaults.ContentPadding,
                 onClick = {
                     haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    endFraction = scrub
+                    endFraction = markEnd()
                 },
-            ) { Text("끝점") }
+            ) { Text("끝점", fontSize = if (compact) 12.sp else 14.sp) }
         }
     }
 
     @Composable
-    fun SaveButton(modifier: Modifier) {
+    fun SaveButton(modifier: Modifier, compact: Boolean = false) {
         Button(
-            modifier = modifier,
+            modifier = modifier.height(if (compact) 34.dp else ButtonDefaults.MinHeight),
+            contentPadding = if (compact) PaddingValues(horizontal = 6.dp) else ButtonDefaults.ContentPadding,
             enabled = startFraction != null && endFraction != null,
             onClick = {
                 val a = startFraction ?: return@Button
@@ -474,12 +515,26 @@ fun RewindScrubScreen(
                 service.exportManual(startMs, endMs, speed)
                 onBackToLive()
             },
-        ) { Text(if (speed == 1f) "구간 저장" else "구간 저장 (${speed}배속 슬로모)") }
+        ) {
+            // The full slow-mo label wraps to 2 lines at the rail's 260dp width, which is exactly
+            // what blows this button's height back up when it's supposed to be compact — a
+            // shorter label in that mode instead of letting it wrap.
+            val label = when {
+                speed == 1f -> "구간 저장"
+                compact -> "저장 ${speed}x"
+                else -> "구간 저장 (${speed}배속 슬로모)"
+            }
+            Text(label, fontSize = if (compact) 12.sp else 14.sp, maxLines = 1)
+        }
     }
 
     @Composable
-    fun LiveButton(modifier: Modifier) {
-        Button(modifier = modifier, onClick = onBackToLive) { Text("라이브로") }
+    fun LiveButton(modifier: Modifier, compact: Boolean = false) {
+        Button(
+            modifier = modifier.height(if (compact) 34.dp else ButtonDefaults.MinHeight),
+            contentPadding = if (compact) PaddingValues(horizontal = 6.dp) else ButtonDefaults.ContentPadding,
+            onClick = onBackToLive,
+        ) { Text("라이브로", fontSize = if (compact) 12.sp else 14.sp) }
     }
 
     RotatedEdge(orientation, Alignment.Center) {
@@ -503,15 +558,19 @@ fun RewindScrubScreen(
                         .width(260.dp)
                         .fillMaxHeight()
                         .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    // Track/Minimap/InfoText stay full-size (the scrub bar itself) — everything
+                    // below is shrunk so "구간 저장"/"라이브로" don't scroll out of view under it.
                     Track(Modifier.fillMaxWidth())
                     Minimap(Modifier.fillMaxWidth())
                     InfoText(Modifier)
-                    ChipsRow(Modifier.fillMaxWidth())
-                    MarkerButtons(Modifier.fillMaxWidth())
-                    SaveButton(Modifier.fillMaxWidth())
-                    LiveButton(Modifier.fillMaxWidth())
+                    ChipsRow(Modifier.fillMaxWidth(), compact = true)
+                    MarkerButtons(Modifier.fillMaxWidth(), compact = true)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        SaveButton(Modifier.weight(2f), compact = true)
+                        LiveButton(Modifier.weight(1f), compact = true)
+                    }
                 }
             }
 

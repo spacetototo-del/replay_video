@@ -175,7 +175,7 @@ fun SettingCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.
  * Selected = filled accent, others = outlined. Wrap a set of these in a [FlowingRow].
  */
 @Composable
-fun ChoiceChip(label: String, selected: Boolean, onClick: () -> Unit) {
+fun ChoiceChip(label: String, selected: Boolean, compact: Boolean = false, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(DivingTokens.chipRadius),
@@ -185,14 +185,24 @@ fun ChoiceChip(label: String, selected: Boolean, onClick: () -> Unit) {
     ) {
         Text(
             label,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-            fontSize = 14.sp,
+            modifier = Modifier.padding(
+                horizontal = if (compact) 9.dp else 14.dp,
+                vertical = if (compact) 4.dp else 8.dp,
+            ),
+            fontSize = if (compact) 12.sp else 14.sp,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         )
     }
 }
 
-/** An icon + label control for the live-screen bottom bar. Grows to share width evenly. */
+/**
+ * An icon + label control for the live-screen bottom bar. Grows to share width evenly.
+ *
+ * [compact] drops the label and shrinks to a small icon-only tile — for landscape on a
+ * regular (non-foldable) phone, where the dock's cross-axis budget is the phone's own portrait
+ * *width* (~360dp on a normal phone vs ~670dp on an unfolded Fold), so the full icon+label tile
+ * that's comfortably small on a Fold eats a much bigger share of that budget here.
+ */
 @Composable
 fun BarAction(
     icon: ImageVector,
@@ -200,6 +210,7 @@ fun BarAction(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.onSurface,
+    compact: Boolean = false,
 ) {
     Surface(
         onClick = onClick,
@@ -208,20 +219,26 @@ fun BarAction(
         color = DivingTokens.scrim,
         contentColor = tint,
     ) {
-        Column(
-            Modifier.padding(vertical = 10.dp, horizontal = 4.dp).heightIn(min = 56.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
-            Icon(icon, contentDescription = label, modifier = Modifier.padding(bottom = 1.dp))
-            Text(
-                label,
-                fontSize = 11.sp,
-                lineHeight = 13.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 2,
-                textAlign = TextAlign.Center,
-            )
+        if (compact) {
+            Box(Modifier.padding(10.dp).heightIn(min = 40.dp), contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = label)
+            }
+        } else {
+            Column(
+                Modifier.padding(vertical = 10.dp, horizontal = 4.dp).heightIn(min = 56.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Icon(icon, contentDescription = label, modifier = Modifier.padding(bottom = 1.dp))
+                Text(
+                    label,
+                    fontSize = 11.sp,
+                    lineHeight = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 2,
+                    textAlign = TextAlign.Center,
+                )
+            }
         }
     }
 }
