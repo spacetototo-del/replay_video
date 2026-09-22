@@ -80,14 +80,12 @@ class ClipExporter(
             return Result.NothingToSave
         }
 
-        // Transformer occasionally throws ExoTimeoutException("Player release timed out") when a
-        // multi-segment composition switches between per-segment asset loaders — real failures
-        // seen in the field that kept recurring even after a retry. The underlying cause: an
-        // ExoPlayer's internal release() has a hardcoded 500ms timeout, and Transformer hits that
-        // release once per segment hand-off — so a long save (more segments = more hand-offs) has
-        // more chances to lose that race under hardware decoder contention than a short one.
-        // Longer, escalating gaps between attempts (mirrors the camera rebind backoff in
-        // RecordingService) give the contended decoder slot progressively more room to clear.
+        // buildAndRun no longer hands Transformer a multi-segment composition — each cut is its
+        // own single-item Transformer job (or, at 1x, not touched by Transformer at all — see
+        // there for why), so the specific failure this retry loop was built for (Transformer's
+        // internal per-segment player hand-off hitting ExoPlayer's hardcoded 500ms release
+        // timeout) shouldn't happen anymore regardless of how many segments a save spans. Kept as
+        // a safety net for whatever else can still go wrong (disk I/O, an unrelated codec hiccup).
         var lastError: Throwable? = null
         repeat(EXPORT_ATTEMPTS) { attempt ->
             val (saved, error) = buildAndRun(plan, partial, speed)
@@ -130,56 +128,79 @@ class ClipExporter(
         )
     }
 
-    /** Null [Result.Saved] paired with the causing error on transform failure, so the caller can
-     *  retry / fall back / log without redoing the try-catch. */
-    private suspend fun buildAndRun(plan: ClipPlan, partial: Boolean, speed: Float): Pair<Result.Saved?, Throwable?> {
-        val editedItems = plan.cuts.map { cut ->
-            val mediaBuilder = MediaItem.Builder().setUri(cut.segment.file.toURI().toString())
-            if (cut.startInSegmentMs > 0 || cut.endInSegmentMs != ClipCut.KEEP_TO_END) {
-                mediaBuilder.setClippingConfiguration(
-                    MediaItem.ClippingConfiguration.Builder()
-                        .setStartPositionMs(cut.startInSegmentMs)
-                        .apply {
-                            if (cut.endInSegmentMs != ClipCut.KEEP_TO_END) {
-                                setEndPositionMs(cut.endInSegmentMs)
-                            }
+    private fun editedItemFor(cut: ClipCut, speed: Float): EditedMediaItem {
+        val mediaBuilder = MediaItem.Builder().setUri(cut.segment.file.toURI().toString())
+        if (cut.startInSegmentMs > 0 || cut.endInSegmentMs != ClipCut.KEEP_TO_END) {
+            mediaBuilder.setClippingConfiguration(
+                MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionMs(cut.startInSegmentMs)
+                    .apply {
+                        if (cut.endInSegmentMs != ClipCut.KEEP_TO_END) {
+                            setEndPositionMs(cut.endInSegmentMs)
                         }
-                        .build(),
-                )
-            }
-            EditedMediaItem.Builder(mediaBuilder.build())
-                .apply {
-                    if (speed != 1f) {
-                        setEffects(Effects(emptyList(), listOf(SpeedChangeEffect(speed))))
-                        setRemoveAudio(true) // slow-motion clips are silent
                     }
-                }
-                .build()
+                    .build(),
+            )
         }
+        return EditedMediaItem.Builder(mediaBuilder.build())
+            .apply {
+                if (speed != 1f) {
+                    setEffects(Effects(emptyList(), listOf(SpeedChangeEffect(speed))))
+                    setRemoveAudio(true) // slow-motion clips are silent
+                }
+            }
+            .build()
+    }
 
-        val composition = Composition.Builder(EditedMediaItemSequence(editedItems)).build()
-        val cacheOut = File(context.cacheDir, "export_${System.currentTimeMillis()}.mp4")
+    /** Null [Result.Saved] paired with the causing error on transform failure, so the caller can
+     *  retry / fall back / log without redoing the try-catch.
+     *
+     *  Each cut runs through Transformer (if it needs one) as its own single-item composition,
+     *  never a multi-item [EditedMediaItemSequence] — a single item never hits the internal
+     *  asset-loader hand-off that throws `ExoTimeoutException: Player release timed out`, so this
+     *  is immune to that failure regardless of segment count. At 1x, a cut that's a whole,
+     *  untrimmed segment (every middle cut, by construction of [ClipCutPlanner]) skips Transformer
+     *  entirely — it's already the exact bytes needed. [RawMp4Concatenator] then stitches whatever
+     *  pieces resulted (compressed-sample copy, no decode) into the final file. */
+    private suspend fun buildAndRun(plan: ClipPlan, partial: Boolean, speed: Float): Pair<Result.Saved?, Throwable?> {
+        val pieces = mutableListOf<File>()
+        val ownFragments = mutableListOf<File>()
+        try {
+            for ((index, cut) in plan.cuts.withIndex()) {
+                val wholeSegment = cut.startInSegmentMs == 0L && cut.endInSegmentMs == ClipCut.KEEP_TO_END
+                if (speed == 1f && wholeSegment) {
+                    pieces += cut.segment.file
+                } else {
+                    val fragment = File(context.cacheDir, "export_frag_${System.currentTimeMillis()}_$index.mp4")
+                    val composition = Composition.Builder(
+                        EditedMediaItemSequence(listOf(editedItemFor(cut, speed))),
+                    ).build()
+                    withContext(Dispatchers.Main) { runTransformer(composition, fragment) }
+                    pieces += fragment
+                    ownFragments += fragment
+                }
+            }
 
-        return try {
-            val result = withContext(Dispatchers.Main) { runTransformer(composition, cacheOut) }
-            val savedDurationMs =
-                if (result.durationMs > 0) result.durationMs
-                else (plan.keptDurationMs / speed).toLong()
+            val cacheOut = File(context.cacheDir, "export_${System.currentTimeMillis()}.mp4")
+            withContext(Dispatchers.IO) { RawMp4Concatenator.concatenate(pieces, cacheOut.absolutePath) }
+            ownFragments.forEach { it.delete() }
+
+            val savedDurationMs = (plan.keptDurationMs / speed).toLong()
             val (uri, name) = withContext(Dispatchers.IO) {
                 publishToGallery(cacheOut, plan.effectiveStartMs)
             }
             cacheOut.delete()
-            Result.Saved(uri, name, savedDurationMs, partial, speed) to null
+            return Result.Saved(uri, name, savedDurationMs, partial, speed) to null
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            // Throwable, not Exception: a 30-minute buffer is ~120 segments for Transformer to
-            // decode+re-encode in one pass, and that's exactly the shape of thing that can throw
-            // OutOfMemoryError rather than a plain Exception. Catching it here turns a silent
-            // service crash into a clean Failed result plus a diagnostic entry.
+            // Throwable, not Exception: a 30-minute buffer is ~120 segments to decode+re-encode
+            // (even split across many single-item jobs), and that's exactly the shape of thing
+            // that can throw OutOfMemoryError rather than a plain Exception. Catching it here
+            // turns a silent service crash into a clean Failed result plus a diagnostic entry.
             Log.e(TAG, "export failed (speed=$speed)", e)
-            cacheOut.delete()
-            null to e
+            ownFragments.forEach { it.delete() }
+            return null to e
         }
     }
 
