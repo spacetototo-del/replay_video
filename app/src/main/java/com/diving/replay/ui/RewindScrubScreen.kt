@@ -117,6 +117,23 @@ fun RewindScrubScreen(
         scrub = if (totalMs > 0) clamped.toFloat() / totalMs else 0f
     }
 
+    // YouTube-style double-tap skip: right half = +5s, left half = -5s. The label flashes over the
+    // video; skipKey changes on every skip so rapid repeats restart the fade-out timer.
+    var skipLabel by remember { mutableStateOf<String?>(null) }
+    var skipLeft by remember { mutableStateOf(false) }
+    var skipKey by remember { mutableStateOf(0) }
+    LaunchedEffect(skipKey) {
+        if (skipLabel != null) {
+            delay(700)
+            skipLabel = null
+        }
+    }
+
+    fun skipBy(deltaMs: Long) {
+        seekTimeline(player.currentTimelineMs() + deltaMs)
+        if (!tz.isVisible(scrub)) tz = tz.centeredOn(scrub)
+    }
+
     fun stepFrame(dir: Int) {
         if (player.isPlaying) player.pause()
         playing = false
@@ -230,8 +247,15 @@ fun RewindScrubScreen(
                 // pointer count keeps the two from stealing each other's gestures — same
                 // approach as the live screen's pinch-vs-swipe.
                 .pointerInput(Unit) {
+                    // Double-tap bookkeeping. The first tap still toggles play/pause immediately
+                    // (no 300ms lag on the common single tap); if a second tap on the same side
+                    // lands within the window, it undoes that toggle by restoring the state from
+                    // before the sequence, then skips. Further taps keep skipping.
+                    var lastTapAt = 0L
+                    var lastTapRight = false
+                    var resumeAfter = false
                     awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
+                        val down = awaitFirstDown(requireUnconsumed = false)
                         var multiTouch = false
                         var moved = false
                         while (true) {
@@ -257,13 +281,34 @@ fun RewindScrubScreen(
                             }
                         }
                         if (!multiTouch && !moved) {
-                            if (player.isPlaying) {
-                                player.pause()
-                                playing = false
+                            val right = down.position.x >= size.width / 2f
+                            val chained = down.uptimeMillis - lastTapAt <= 300L && right == lastTapRight
+                            if (chained) {
+                                if (resumeAfter) {
+                                    player.setSpeed(speed)
+                                    player.play()
+                                    playing = true
+                                } else {
+                                    player.pause()
+                                    playing = false
+                                }
+                                skipBy(if (right) 5000L else -5000L)
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                skipLeft = !right
+                                skipLabel = if (right) "+5초 ▶▶" else "◀◀ -5초"
+                                skipKey++
                             } else {
-                                player.play()
-                                playing = true
+                                resumeAfter = player.isPlaying
+                                if (player.isPlaying) {
+                                    player.pause()
+                                    playing = false
+                                } else {
+                                    player.play()
+                                    playing = true
+                                }
                             }
+                            lastTapAt = down.uptimeMillis
+                            lastTapRight = right
                         }
                     }
                 },
@@ -289,6 +334,18 @@ fun RewindScrubScreen(
                     SurfaceView(ctx).also { sv -> player.exoPlayer.setVideoSurfaceView(sv) }
                 },
             )
+            skipLabel?.let { label ->
+                Text(
+                    label,
+                    modifier = Modifier
+                        .align(if (skipLeft) Alignment.CenterStart else Alignment.CenterEnd)
+                        .padding(horizontal = 24.dp)
+                        .background(Color(0x99000000), RoundedCornerShape(20.dp))
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    color = Color.White,
+                    fontSize = 16.sp,
+                )
+            }
         }
     }
 
